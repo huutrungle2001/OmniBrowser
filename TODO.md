@@ -1,24 +1,30 @@
-# OmniBrowser: Task Backlog & Progress Tracker
+# OmniBrowser: Master Backlog & Task Tracking
 
-## Active Milestone: Phase 1 (Core Foundation & Semantic Scanner)
-
-- [ ] Task 001: Implement `src/browser_core/contracts.py` (Data schemas, error taxonomy, constants)
-- [ ] Task 002: Implement `scripts/dom_agent.js` (DOM candidate scanner, opaque refs, visibility filter)
-- [ ] Task 003: Implement `src/browser_core/page_manager.py` (CDP connection, target attach, epoch lifecycle)
-- [ ] Task 004: Phase 1 Integration Test with HTML fixture
-
----
-
-## Backlog: Phase 2 (Engine & Primitives)
-
-- [ ] Task 005: Implement `src/browser_core/engine.py` (`observe`, `act`, postcondition watchers, state delta)
-- [ ] Task 006: Implement `src/browser_core/primitives.py` (`inspectVisual`, `runBrowserCode`)
-- [ ] Task 007: Phase 2 Integration Test on ephemeral Chrome instance
+## Phase 1: Core Foundation & Semantic Scanner
+- [ ] **Task 001**: Implement `src/browser_core/contracts.py` (Dataclasses, error taxonomy, exit codes)
+- [ ] **Task 002**: Implement `scripts/dom_agent.js` (BFS traversal, WeakMap, opaque ref `f0.d9.n186`, candidate filtering)
+- [ ] **Task 003**: Implement `src/browser_core/page_manager.py` (Playwright CDP connection, multi-target attach, epoch token, script injection)
+- [ ] **Task 004**: Create HTML test fixtures (`tests/fixtures/standard_form.html`, `spa_replacement.html`, `iframe_parent.html`)
+- [ ] **Task 005**: Author and verify Phase 1 test suite (`tests/test_observe.py`) on ephemeral Chrome instance
 
 ---
 
-## Backlog: Phase 3 (CLI Integration, Backward Compatibility & Skill Packaging)
+## Phase 2: Action Engine & Escape Hatches
+- [ ] **Task 006**: Implement `src/browser_core/engine.py` (`act()`, native input dispatch, expectation watchers, state delta, stale-ref recovery)
+- [ ] **Task 007**: Implement `src/browser_core/primitives.py` (`inspect()`, bounded `runBrowserCode()`, targeted `inspectVisual()` crop via Pillow)
+- [ ] **Task 008**: Create interactive fixtures (`tests/fixtures/shadow_components.html`, `canvas_ui.html`)
+- [ ] **Task 009**: Author and verify Phase 2 test suite (`tests/test_actions.py`, `tests/test_stale_recovery.py`, `tests/test_primitives.py`)
 
-- [ ] Task 008: Update `scripts/cdp_controller.py` with unified subcommand dispatch
-- [ ] Task 009: Comprehensive regression test for legacy commands (`goto`, `eval`, `list-tabs`, `screenshot`)
-- [ ] Task 010: Deploy and sync to `~/.gemini/config/skills/browser-automation-cdp/` + update `SKILL.md`
+---
+
+## Phase 3: Unified CLI, Backward Compatibility & Benchmarking
+- [ ] **Task 010**: Implement `scripts/cdp_controller.py` (Subcommand router, 100% legacy compatibility for `list-tabs`, `goto`, `eval`, `screenshot`)
+- [ ] **Task 011**: Author regression test suite (`tests/test_cli_legacy.py`)
+- [ ] **Task 012**: Author benchmark suite comparing legacy raw HTML/screenshot vs `observe`/`act` (latency & token usage)
+
+---
+
+## Phase 4: Skill Packaging & Production Deployment
+- [ ] **Task 013**: Deploy and sync code to `~/.gemini/config/skills/browser-automation-cdp/`
+- [ ] **Task 014**: Update `~/.gemini/config/skills/browser-automation-cdp/SKILL.md` with complete API reference & usage instructions
+- [ ] **Task 015**: Independent audit and sign-off by `omni_reviewer` (`STATUS: APPROVED`)
