@@ -1,0 +1,20 @@
+{
+  "id": "chatgpt_copy_response",
+  "name": "Copy last response from ChatGPT",
+  "description": "Click copy turn action button on the assistant response.",
+  "domain_pattern": ["https://chatgpt.com/*"],
+  "steps": [
+    {
+      "action": "click",
+      "target": "[data-testid='copy-turn-action-button']"
+    }
+  ],
+  "validation": {},
+  "metadata": {
+    "version": "1.0",
+    "success_count": 0,
+    "failure_count": 0,
+    "last_failure_reason": null,
+    "failure_ledger": []
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "id": "chatgpt_new_chat",
+  "name": "Start new ChatGPT conversation",
+  "description": "Click the new chat button or navigate to fresh ChatGPT root.",
+  "domain_pattern": ["https://chatgpt.com/*"],
+  "steps": [
+    {
+      "action": "click",
+      "target": "a[data-testid='create-new-chat-button'], a:has-text('New chat')"
+    }
+  ],
+  "validation": {
+    "text_present": "ChatGPT"
+  },
+  "metadata": {
+    "version": "1.0",
+    "success_count": 0,
+    "failure_count": 0,
+    "last_failure_reason": null,
+    "failure_ledger": []
+  }
+}

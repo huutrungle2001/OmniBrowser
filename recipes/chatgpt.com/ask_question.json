@@ -1,0 +1,25 @@
+{
+  "id": "chatgpt_ask_question",
+  "name": "Submit prompt to ChatGPT",
+  "description": "Fill prompt textarea and click the send button.",
+  "domain_pattern": ["https://chatgpt.com/*"],
+  "steps": [
+    {
+      "action": "fill",
+      "target": "#prompt-textarea, div.ProseMirror",
+      "value": "{{prompt}}"
+    },
+    {
+      "action": "click",
+      "target": "button[data-testid='send-button'], button[aria-label*='Send'], button[aria-label*='Gửi']"
+    }
+  ],
+  "validation": {},
+  "metadata": {
+    "version": "1.0",
+    "success_count": 0,
+    "failure_count": 0,
+    "last_failure_reason": null,
+    "failure_ledger": []
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "id": "chatgpt_switch_model",
+  "name": "Open model switcher menu",
+  "description": "Click the model switch button to open model selector dropdown.",
+  "domain_pattern": ["https://chatgpt.com/*"],
+  "steps": [
+    {
+      "action": "click",
+      "target": "button[aria-label='Switch model']"
+    }
+  ],
+  "validation": {},
+  "metadata": {
+    "version": "1.0",
+    "success_count": 0,
+    "failure_count": 0,
+    "last_failure_reason": null,
+    "failure_ledger": []
+  }
+}
