@@ -98,7 +98,7 @@ fi
 
 check_pane_alive() {
     local pane="$1"
-    tmux display-message -p -t "$pane" '#{pane_dead}' >/dev/null 2>&1
+    tmux list-panes -t "$pane" >/dev/null 2>&1
 }
 
 resolve_target() {
@@ -190,9 +190,9 @@ if [[ -n "$record_arg" ]]; then
     payload_line="${payload_line} | RECORD=${record_arg}"
 fi
 
-# Send literal payload line first to avoid key translation glitches, then send Enter
+# Send literal payload line first to avoid key translation glitches, then send C-m (Enter)
 tmux send-keys -t "$target_pane" -l "$payload_line"
-tmux send-keys -t "$target_pane" Enter
+tmux send-keys -t "$target_pane" C-m
 
 echo "Notification delivered to $target_pane"
 exit 0
