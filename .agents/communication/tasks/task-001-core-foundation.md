@@ -5,9 +5,9 @@ RECORD_ID: task-001-core-foundation
 STATUS: TASK_READY
 ATTEMPT: 1
 CREATED_AT: 2026-09-17T00:53:00Z
-UPDATED_AT: 2026-09-17T01:25:00Z
-FROM: omni_orchestrator
-TO: omni_implementer
+UPDATED_AT: 2026-09-17T01:30:00Z
+FROM: orchestrator
+TO: implementer
 
 ## Objective
 

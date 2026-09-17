@@ -7,7 +7,7 @@ usage() {
 Usage:
   Flag-based (any order):
     scripts/notify_agent.sh \
-      -a|--agent|-t|--target <tmux_target|omni_hub|omni_orchestrator|omni_implementer|omni_reviewer|workbench-codex> \
+      -a|--agent|-t|--target <hub|orchestrator|implementer|reviewer|tmux_target> \
       -m|--message <message_string> \
       -f|--file <file_path_containing_message> \
       [-r|--record <committed-task-result-or-review.md>] \
@@ -17,9 +17,9 @@ Usage:
     scripts/notify_agent.sh <tmux_target> <message> [record_path]
 
 Examples:
-  scripts/notify_agent.sh -a omni_implementer -m "Task task-001 ready" -r .agents/communication/tasks/task-001.md
-  scripts/notify_agent.sh -a omni_reviewer -m "Result for task-001 ready" -r .agents/communication/results/result-001.md
-  scripts/notify_agent.sh -a omni_hub -m "Phase 1 complete"
+  scripts/notify_agent.sh -a implementer -m "Task task-001 ready" -r .agents/communication/tasks/task-001-core-foundation.md
+  scripts/notify_agent.sh -a reviewer -m "Result for task-001 ready" -r .agents/communication/results/result-001.md
+  scripts/notify_agent.sh -a hub -m "Phase 1 complete"
 EOF
 }
 
@@ -96,68 +96,74 @@ if [[ -z "$target_arg" || -z "$message_arg" ]]; then
     exit 2
 fi
 
+check_pane_alive() {
+    local pane="$1"
+    tmux display-message -p -t "$pane" '#{pane_dead}' >/dev/null 2>&1
+}
+
 resolve_target() {
     local target="$1"
 
-    # 1. Exact match
-    if tmux display-message -p -t "${target}:0.0" '#{pane_dead}' >/dev/null 2>&1; then
-        echo "${target}:0.0"
-        return 0
-    elif tmux display-message -p -t "${target}" '#{pane_dead}' >/dev/null 2>&1; then
-        echo "${target}"
-        return 0
-    fi
-
-    # 2. Check prefixes
-    for prefix in "omni_" "omni-" "workbench_" "workbench-"; do
-        if tmux display-message -p -t "${prefix}${target}:0.0" '#{pane_dead}' >/dev/null 2>&1; then
-            echo "${prefix}${target}:0.0"
-            return 0
-        elif tmux display-message -p -t "${prefix}${target}" '#{pane_dead}' >/dev/null 2>&1; then
-            echo "${prefix}${target}"
+    # 1. Exact match checks
+    for candidate in "${target}:0.0" "${target}" "${target//_/-}:0.0" "${target//-/_}:0.0" "${target//_/-}" "${target//-/_}"; do
+        if check_pane_alive "$candidate"; then
+            echo "$candidate"
             return 0
         fi
     done
 
-    # 3. Role name aliases fallback
+    # 2. Canonical role aliases fallback (supporting omni-hub, workbench sessions, etc.)
     case "$target" in
-        hub)
-            if tmux display-message -p -t "omni_hub:0.0" '#{pane_dead}' >/dev/null 2>&1; then
-                echo "omni_hub:0.0"
-            else
-                echo "workbench_hub:0.0"
-            fi
+        hub|omni_hub|omni-hub|workbench_hub)
+            for cand in "omni-hub:0.0" "omni_hub:0.0" "omni-hub" "omni_hub" "workbench_hub:0.0" "workbench_hub"; do
+                if check_pane_alive "$cand"; then
+                    echo "$cand"
+                    return 0
+                fi
+            done
             ;;
-        orchestrator)
-            if tmux display-message -p -t "omni_orchestrator:0.0" '#{pane_dead}' >/dev/null 2>&1; then
-                echo "omni_orchestrator:0.0"
-            else
-                echo "workbench_orchestrator:0.0"
-            fi
+        orchestrator|omni_orchestrator|omni-orchestrator|workbench_orchestrator)
+            for cand in "omni_orchestrator:0.0" "omni-orchestrator:0.0" "omni_orchestrator" "workbench_orchestrator:0.0" "workbench_orchestrator"; do
+                if check_pane_alive "$cand"; then
+                    echo "$cand"
+                    return 0
+                fi
+            done
             ;;
-        implementer|coder|dev)
-            if tmux display-message -p -t "omni_implementer:0.0" '#{pane_dead}' >/dev/null 2>&1; then
-                echo "omni_implementer:0.0"
-            elif tmux display-message -p -t "workbench-codex:0.0" '#{pane_dead}' >/dev/null 2>&1; then
-                echo "workbench-codex:0.0"
-            elif tmux display-message -p -t "workbench-codex" '#{pane_dead}' >/dev/null 2>&1; then
-                echo "workbench-codex"
-            else
-                echo "omni_implementer:0.0"
-            fi
+        implementer|coder|dev|omni_implementer|omni-implementer|workbench-codex)
+            for cand in "omni-hub:0.0" "omni-hub" "omni_implementer:0.0" "omni-implementer:0.0" "omni_implementer" "workbench-codex:0.0" "workbench-codex"; do
+                if check_pane_alive "$cand"; then
+                    echo "$cand"
+                    return 0
+                fi
+            done
             ;;
-        reviewer|review)
-            echo "omni_reviewer:0.0"
-            ;;
-        *)
-            return 1
+        reviewer|review|omni_reviewer|omni-reviewer|workbench_reviewer)
+            for cand in "omni_reviewer:0.0" "omni-reviewer:0.0" "omni_reviewer" "omni-reviewer" "workbench_reviewer:0.0" "workbench_reviewer"; do
+                if check_pane_alive "$cand"; then
+                    echo "$cand"
+                    return 0
+                fi
+            done
             ;;
     esac
+
+    # 3. Check standard prefixes
+    for prefix in "omni_" "omni-" "workbench_" "workbench-"; do
+        for cand in "${prefix}${target}:0.0" "${prefix}${target}"; do
+            if check_pane_alive "$cand"; then
+                echo "$cand"
+                return 0
+            fi
+        done
+    done
+
+    return 1
 }
 
 if ! target_pane="$(resolve_target "$target_arg")"; then
     echo "ERROR: unsupported target or session does not exist: $target_arg" >&2
-    echo "Allowed targets: hub, orchestrator, implementer, reviewer, or active tmux session (e.g. omni_orchestrator, workbench-codex)." >&2
+    echo "Allowed targets: hub, orchestrator, implementer, reviewer, or active tmux session (e.g. omni-hub, omni_reviewer)." >&2
     exit 2
 fi
 
@@ -169,6 +175,10 @@ repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
 # Lint check if record is provided
 if [[ -n "$record_arg" ]]; then
     linter_script="${repo_root}/scripts/lint_communication_records.py"
+    if [[ ! -f "$linter_script" ]]; then
+        # Check skill location fallback
+        linter_script="${repo_root}/.agents/skills/agent-protocol/scripts/lint_communication_records.py"
+    fi
     if [[ -f "$linter_script" ]]; then
         python3 "$linter_script" --handoff "$record_arg" --target "$target_arg"
     fi
@@ -180,6 +190,9 @@ if [[ -n "$record_arg" ]]; then
     payload_line="${payload_line} | RECORD=${record_arg}"
 fi
 
-tmux send-keys -t "$target_pane" "$payload_line" Enter
+# Send literal payload line first to avoid key translation glitches, then send Enter
+tmux send-keys -t "$target_pane" -l "$payload_line"
+tmux send-keys -t "$target_pane" Enter
+
 echo "Notification delivered to $target_pane"
 exit 0

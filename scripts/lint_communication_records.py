@@ -12,7 +12,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Canonical roles + optional project-prefixed roles
 ROLE_PATTERN = re.compile(r"^([a-zA-Z0-9_-]+_)?(hub|orchestrator|implementer|reviewer|oracle)$")
+RFC3339_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
 
 VALID_STATUSES = {
     "TASK": {"TASK_READY", "BLOCKED"},
@@ -31,6 +33,31 @@ REQUIRED_SECTIONS = {
 }
 
 
+def find_repo_root(start_path: Path) -> Path:
+    """Finds git repository root from given path."""
+    current = start_path.resolve()
+    for parent in [current] + list(current.parents):
+        if (parent / ".git").exists():
+            return parent
+    return start_path.parent
+
+
+def verify_git_commit(commit_sha: str, repo_root: Path) -> bool:
+    """Verifies that commit_sha exists in git history."""
+    if not re.match(r"^[0-9a-fA-F]{7,40}$", commit_sha):
+        return False
+    try:
+        res = subprocess.run(
+            ["git", "cat-file", "-e", f"{commit_sha}^{{commit}}"],
+            cwd=str(repo_root),
+            capture_output=True,
+            check=False,
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
 def parse_metadata_header(content: str):
     """Parses scalar metadata block immediately following the H1 title."""
     lines = content.strip().splitlines()
@@ -42,7 +69,6 @@ def parse_metadata_header(content: str):
 
     metadata = {}
     errors = []
-    header_lines = 0
 
     idx = 1
     # Skip empty lines between title and header
@@ -71,20 +97,20 @@ def parse_metadata_header(content: str):
 
         key, val = match.groups()
         metadata[key] = val.strip()
-        header_lines += 1
         idx += 1
 
     body = lines[idx:]
     return metadata, body, errors
 
 
-def validate_record(record_path: Path, target_role: str = None, check_git: bool = True):
+def validate_record(record_path: Path, target_role: str = None, is_handoff: bool = False, check_git: bool = True):
     errors = []
     warnings = []
 
     if not record_path.exists():
         return [f"File not found: {record_path}"], []
 
+    repo_root = find_repo_root(record_path)
     content = record_path.read_text(encoding="utf-8")
     metadata, body, parse_errors = parse_metadata_header(content)
     errors.extend(parse_errors)
@@ -104,20 +130,19 @@ def validate_record(record_path: Path, target_role: str = None, check_git: bool 
     if not rec_id:
         errors.append("Missing required header: 'RECORD_ID'")
     else:
-        # Check filename matches RECORD_ID
+        # Check filename matches RECORD_ID exactly
         expected_stem = record_path.stem
-        if rec_id not in expected_stem and expected_stem not in rec_id:
-            warnings.append(f"RECORD_ID '{rec_id}' does not match filename stem '{expected_stem}'")
+        if rec_id != expected_stem:
+            errors.append(f"RECORD_ID '{rec_id}' does not match filename stem '{expected_stem}'")
 
-    # 3. TIMESTAMPS
+    # 3. TIMESTAMPS (RFC 3339 strict check)
     for ts_field in ["CREATED_AT", "UPDATED_AT"]:
         ts_val = metadata.get(ts_field)
         if not ts_val:
             errors.append(f"Missing required header: '{ts_field}'")
         else:
-            # RFC 3339 basic validation (YYYY-MM-DDTHH:MM:SS)
-            if not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", ts_val):
-                errors.append(f"Invalid RFC-3339 timestamp for {ts_field}: '{ts_val}'")
+            if not RFC3339_PATTERN.match(ts_val):
+                errors.append(f"Invalid RFC-3339 timestamp for {ts_field}: '{ts_val}'. Expected format: YYYY-MM-DDTHH:MM:SSZ")
 
     # 4. STATUS
     status = metadata.get("STATUS")
@@ -157,32 +182,98 @@ def validate_record(record_path: Path, target_role: str = None, check_git: bool 
     # 7. Target role routing check (if handed off)
     if target_role and to_role:
         to_roles = [r.strip() for r in to_role.split(",") if r.strip()]
-        # Strip prefixes for matching if needed
-        clean_target = re.sub(r"^[a-zA-Z0-9_-]+_", "", target_role)
-        clean_to_roles = [re.sub(r"^[a-zA-Z0-9_-]+_", "", r) for r in to_roles]
+        clean_target = re.sub(r"^[a-zA-Z0-9_-]+_", "", target_role).replace("-", "_")
+        clean_to_roles = [re.sub(r"^[a-zA-Z0-9_-]+_", "", r).replace("-", "_") for r in to_roles]
         if target_role not in to_roles and clean_target not in clean_to_roles:
             errors.append(f"Handoff target '{target_role}' not listed in record TO field: '{to_role}'")
 
-    # 8. Required Sections Check
+    # 8. Record-specific commit verification
+    if rec_type == "RESULT":
+        base_commit = metadata.get("BASE_COMMIT")
+        tip_commit = metadata.get("IMPLEMENTATION_TIP")
+        if not base_commit:
+            errors.append("RESULT record must include 'BASE_COMMIT' header")
+        elif check_git and not verify_git_commit(base_commit, repo_root):
+            errors.append(f"BASE_COMMIT '{base_commit}' is not a valid commit in Git history")
+
+        if not tip_commit:
+            errors.append("RESULT record must include 'IMPLEMENTATION_TIP' header")
+        elif check_git and not verify_git_commit(tip_commit, repo_root):
+            errors.append(f"IMPLEMENTATION_TIP '{tip_commit}' is not a valid commit in Git history")
+
+        # State machine check: Task must exist and be TASK_READY
+        task_stem = rec_id.replace("result-", "task-") if rec_id.startswith("result-") else rec_id
+        task_path = record_path.parent.parent / "tasks" / f"{task_stem}.md"
+        if not task_path.exists():
+            # Also try direct id
+            task_path = record_path.parent.parent / "tasks" / f"{rec_id}.md"
+        if not task_path.exists():
+            warnings.append(f"Referenced task file not found under tasks/ for result '{rec_id}'")
+        else:
+            task_meta, _, _ = parse_metadata_header(task_path.read_text(encoding="utf-8"))
+            if task_meta.get("STATUS") != "TASK_READY":
+                warnings.append(f"Task '{task_path.name}' status is '{task_meta.get('STATUS')}', expected 'TASK_READY'")
+
+    elif rec_type == "REVIEW":
+        base_commit = metadata.get("BASE_COMMIT")
+        reviewed_commit = metadata.get("REVIEWED_COMMIT")
+        if not base_commit:
+            errors.append("REVIEW record must include 'BASE_COMMIT' header")
+        elif check_git and not verify_git_commit(base_commit, repo_root):
+            errors.append(f"BASE_COMMIT '{base_commit}' is not a valid commit in Git history")
+
+        if not reviewed_commit:
+            errors.append("REVIEW record must include 'REVIEWED_COMMIT' header")
+        elif check_git and not verify_git_commit(reviewed_commit, repo_root):
+            errors.append(f"REVIEWED_COMMIT '{reviewed_commit}' is not a valid commit in Git history")
+
+    # 9. Required Sections Check (Fatal during handoff, Warning otherwise)
     if rec_type in REQUIRED_SECTIONS:
         body_text = "\n".join(body)
         for sec in REQUIRED_SECTIONS[rec_type]:
             if not re.search(rf"^##\s+.*{re.escape(sec)}", body_text, re.MULTILINE | re.IGNORECASE):
-                warnings.append(f"Section '## {sec}' not found in record body")
+                msg = f"Required section '## {sec}' not found in record body"
+                if is_handoff:
+                    errors.append(msg)
+                else:
+                    warnings.append(msg)
 
-    # 9. Git Status Check (if check_git)
+    # 10. Git Status Check (if check_git)
     if check_git:
         try:
+            # Check if the record itself has uncommitted changes
             res = subprocess.run(
                 ["git", "status", "--porcelain", str(record_path)],
+                cwd=str(repo_root),
                 capture_output=True,
                 text=True,
-                check=False
+                check=False,
             )
             if res.returncode == 0 and res.stdout.strip():
                 errors.append(f"Record has uncommitted Git modifications: '{record_path}'. All records must be committed before handoff.")
-        except Exception:
-            pass
+
+            # On handoff of RESULT, verify that entire worktree is clean
+            if is_handoff and rec_type == "RESULT":
+                res_all = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    cwd=str(repo_root),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if res_all.returncode == 0 and res_all.stdout.strip():
+                    dirty_lines = [
+                        line for line in res_all.stdout.strip().splitlines()
+                        if not line.strip().endswith(".tmp/") and not line.strip().startswith("?? .tmp/")
+                    ]
+                    if dirty_lines:
+                        errors.append(
+                            "Worktree has uncommitted modifications before RESULT handoff. "
+                            "All implementation code and tests must be committed:\n  "
+                            + "\n  ".join(dirty_lines[:5])
+                        )
+        except Exception as e:
+            warnings.append(f"Git check skipped due to error: {e}")
 
     return errors, warnings
 
@@ -196,12 +287,18 @@ def main():
 
     args = parser.parse_args()
 
+    is_handoff = bool(args.handoff)
     target_path = Path(args.handoff or args.record or "")
     if not str(target_path):
         parser.print_help()
         sys.exit(2)
 
-    errors, warnings = validate_record(target_path, target_role=args.target, check_git=not args.no_git)
+    errors, warnings = validate_record(
+        target_path,
+        target_role=args.target,
+        is_handoff=is_handoff,
+        check_git=not args.no_git,
+    )
 
     for w in warnings:
         print(f"[WARN] {w}", file=sys.stderr)

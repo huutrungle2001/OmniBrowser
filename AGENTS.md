@@ -108,34 +108,58 @@ OmniBrowser operates under a strictly coordinated, 4-agent workflow:
 
 ## 5. Operational Protocol & Mandatory Turn Handoff
 
-### 5.1 Communication Hygiene
-- **Authoritative Mechanism**: Durable Markdown records in `.agents/communication/` and `scripts/notify_agent.sh` are the **ONLY** authoritative communication channel.
+### 5.1 Communication Hygiene & Canonical Roles
+- **Canonical Roles**: Communication records strictly use canonical roles (`hub`, `orchestrator`, `implementer`, `reviewer`). Transport mapping to physical tmux panes (e.g. `omni-hub`, `omni_reviewer`) is handled decoupled by `scripts/notify_agent.sh`.
+- **Authoritative Mechanism**: Durable Markdown records in `.agents/communication/` committed to Git are the **ONLY** source of truth. Tmux notifications are best-effort asynchronous wake-ups.
 - **Zero Raw Terminal Dumps**: Communication records must use structured Markdown evidence tables summarizing command, exit code, and high-level outcome.
-- **Context Resets (`/new`)**: Implementer and Reviewer sessions must execute context resets (`/new`) before picking up new tasks to prevent context poisoning.
+- **Context Resets (`/new`)**: Reviewer sessions must execute context resets (`/new`) to ensure clean-room, adversarial verification without inheriting implementer assumptions.
 
-### 5.2 Mandatory Handoff Routing Matrix
-1. **Orchestrator** $\rightarrow$ `omni_implementer`:
+### 5.2 Task Immutability & Spec Drift Prevention
+- **Frozen After Notification**: Once a task record (`tasks/<id>.md`) is committed and notified with `STATUS: TASK_READY`, its Acceptance Criteria and Scope are **frozen**.
+- **No In-Place Spec Mutations**: If requirements, technical design, or constraints evolve during implementation, do **NOT** silently edit the existing task file. Instead:
+  - Increment `ATTEMPT: 2` (or author a new task version with `SUPERSEDES: <previous-task-id>`).
+  - Document the rationale in the task revision.
+  - Implementer and Reviewer must align on the identical task revision to prevent **Spec Drift**.
+
+### 5.3 Two-Lane Workflow
+To avoid bureaucratic overhead while maintaining absolute safety on critical paths:
+1. **Standard Lane (Core & Safety-Critical)**:
+   - *Applies to:* Core engine, CDP bindings, DOM agent, contracts, security/profile sandboxing, CLI backward compatibility.
+   - *Workflow:* Full 4-step cycle: `Task` $\rightarrow$ `Implementation` $\rightarrow$ `Result (with commit SHA)` $\rightarrow$ `Independent Review (fresh context)`.
+2. **Trivial Lane (Low-Risk / Cosmetic)**:
+   - *Applies to:* Documentation fixes, comments, typo corrections, minor test fixture text not altering contracts.
+   - *Workflow:* Lightweight cycle: `Task` $\rightarrow$ `Implementation + Result commit` $\rightarrow$ Quick reviewer verification without multi-round ceremony.
+
+### 5.4 Mandatory Handoff Routing Matrix
+1. **Orchestrator** $\rightarrow$ `implementer`:
    ```bash
-   scripts/notify_agent.sh -a omni_implementer -m "Task <id> ready." -r .agents/communication/tasks/<id>.md
+   scripts/notify_agent.sh -a implementer -m "Task <id> ready." -r .agents/communication/tasks/<id>.md
    ```
-2. **Implementer** $\rightarrow$ `omni_reviewer`:
+2. **Implementer** $\rightarrow$ `reviewer`:
    ```bash
-   scripts/notify_agent.sh -a omni_reviewer -m "Result for <id> ready for review." -r .agents/communication/results/<id>.md
+   scripts/notify_agent.sh -a reviewer -m "Result for <id> ready for review." -r .agents/communication/results/<id>.md
    ```
 3. **Reviewer**:
-   - If `STATUS: REVISION_REQUIRED` $\rightarrow$ `omni_implementer`:
+   - If `STATUS: REVISION_REQUIRED` $\rightarrow$ `implementer`:
      ```bash
-     scripts/notify_agent.sh -a omni_implementer -m "Revision required for <id>." -r .agents/communication/reviews/<id>.md
+     scripts/notify_agent.sh -a implementer -m "Revision required for <id>." -r .agents/communication/reviews/<id>.md
      ```
-   - If `STATUS: APPROVED` $\rightarrow$ `omni_orchestrator` & `omni_hub`:
+   - If `STATUS: APPROVED` $\rightarrow$ `orchestrator` & `hub`:
      ```bash
-     scripts/notify_agent.sh -a omni_orchestrator -m "Task <id> approved." -r .agents/communication/reviews/<id>.md
-     scripts/notify_agent.sh -a omni_hub -m "Task <id> approved." -r .agents/communication/reviews/<id>.md
+     scripts/notify_agent.sh -a orchestrator -m "Task <id> approved." -r .agents/communication/reviews/<id>.md
+     scripts/notify_agent.sh -a hub -m "Task <id> approved." -r .agents/communication/reviews/<id>.md
      ```
 
-### 5.3 Turn Completion Rule (No Infinite Waiting)
+### 5.5 Turn Completion Rule (No Infinite Waiting)
 - Once an agent finishes sending a notification via `notify_agent.sh`, it **MUST immediately end its turn** and become inactive.
 - Agents must **NEVER** poll or loop waiting for the other agent. The receiving agent will wake the sender upon completing its turn.
+
+### 5.6 Semantic Linter Enforcement
+Before every handoff, `scripts/notify_agent.sh` automatically invokes `scripts/lint_communication_records.py --handoff <record> --target <target>`:
+- **Git Commit Verifiability**: All `BASE_COMMIT`, `IMPLEMENTATION_TIP`, and `REVIEWED_COMMIT` hashes must exist in Git history (`git cat-file -e`).
+- **Clean Worktree**: When handing off a Result, the repository worktree must be 100% clean (no untracked or modified files).
+- **Mandatory Sections**: Required sections (Objective, Scope, Acceptance Criteria, Validation, Evidence) are fatal errors if omitted.
+- **Literal Key Dispatch**: `notify_agent.sh` uses `tmux send-keys -l` to prevent shell/vim escape corruption.
 
 ---
 
