@@ -101,8 +101,18 @@ OmniBrowser operates under a strictly coordinated, 4-agent workflow:
 ### Agent Roster:
 1. **`omni_hub`** (Interactive Master Window): Human operator communication, milestone supervision, global progress monitoring.
 2. **`omni_orchestrator`** (Task Architect): Decomposes `PLAN.md` into falsifiable `.agents/communication/tasks/<task-id>.md` specifications with owned/preserved file scopes.
-3. **`omni_implementer`** (Codex Lead / Systems Engineer): Owns code implementation, spawns subagents for decoupled tasks, runs ephemeral Chrome tests, and commits clean results.
+3. **`omni_implementer`** (Codex Lead / Supervisory Tech Lead): Operates strictly in a Supervisory & Coordination role. MUST ALWAYS summon worker subagents (`ag/gemini-3.8-flash-high` via `spawn_agent`) to perform code writing, editing, and test authoring. Direct bulk coding on the main thread is strictly forbidden.
 4. **`omni_reviewer`** (Adversarial Quality Gate): Runs in a fresh context, audits git diffs independently, tests backward compatibility, and issues binding approval.
+
+### 4.1 Mandatory Subagent Delegation Invariant (Supervisor-Only Rule)
+- **Zero Direct Coding on Main Thread**: The Implementer Lead (`omni-hub` / `omni_implementer` running `cx/gpt-5.6-terra`) is strictly an **Architect, Supervisor, and Integration Gatekeeper**. It must **NEVER** write or edit implementation code, modules, or test suites directly on its main thread.
+- **Mandatory Subagent Delegation**: For **EVERY** implementation task, `omni_implementer` **MUST**:
+  1. Decompose the task specification into discrete, modular sub-assignments with explicit interface boundaries and input/output contracts.
+  2. Summon worker subagents (`ag/gemini-3.8-flash-high` via `spawn_agent`) to write the code, implement the modules, and create test files.
+  3. Supervise subagent outputs, audit their diffs, and verify adherence to the agreed contracts.
+  4. Execute final sandbox integration tests on ephemeral Chrome.
+  5. Author the Result record, commit clean changes, and dispatch handoff to Reviewer.
+- **Rationale**: Enforces dual-tier token economics (preserving `gpt-5.6-terra` high reasoning for planning/audit while utilizing fast, unlimited `gemini-3.8-flash` threads for code production), eliminates context pollution on the lead agent, and guarantees strict separation of concerns.
 
 ---
 
