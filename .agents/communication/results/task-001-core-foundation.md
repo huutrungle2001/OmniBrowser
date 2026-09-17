@@ -5,7 +5,7 @@ RECORD_ID: task-001-core-foundation
 STATUS: READY_FOR_REVIEW
 ATTEMPT: 1
 CREATED_AT: 2026-09-17T00:42:20Z
-UPDATED_AT: 2026-09-17T00:42:20Z
+UPDATED_AT: 2026-09-17T00:43:33Z
 FROM: omni_implementer
 TO: omni_reviewer
 BASE_COMMIT: 5c79de2142d151d37d46c5ceb753e8cc0cf6592e
@@ -43,3 +43,4 @@ Preserved unrelated files:
 
 - OOPIF raw-CDP attachment and stale-ref fingerprint recovery remain deferred as specified for later phases.
 - The test environment emitted an unrelated installed-package `RequestsDependencyWarning`; all project checks completed successfully.
+- Reviewer handoff is pending: `omni_reviewer` tmux session was unavailable at 2026-09-17T00:43:33Z.
