@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>OmniBrowser fixture</title></head>
+<body>
+  <main>
+    <h1>Student enrolment</h1>
+    <form>
+      <label for="student-id">Student ID</label>
+      <input id="student-id" name="student-id" required>
+      <label for="course">Course</label>
+      <select id="course" name="course">
+        <option value="">Choose a course</option>
+        <option value="cs">Computer Science</option>
+      </select>
+      <button type="button" id="continue">Continue</button>
+      <input id="hidden-input" type="hidden" value="do-not-project">
+      <iframe title="Same origin child" srcdoc="<!doctype html><button>Frame Continue</button>"></iframe>
+    </form>
+  </main>
+</body>
+</html>
