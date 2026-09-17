@@ -107,6 +107,11 @@ def _manager_page(args):
     manager = PageManager(args.cdp_url)
     manager.connect()
     page = manager.primary_page()
+    if getattr(args, "match", None) and manager.context:
+        for p in manager.context.pages:
+            if args.match in p.url or args.match in p.title():
+                page = p
+                break
     manager.install_scanner(page)
     return manager, page
 
