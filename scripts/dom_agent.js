@@ -7,6 +7,7 @@
   let context = null;
   const nodeTokens = new WeakMap();
   const refs = new Map();
+  const fingerprints = new Map();
 
   const interactiveRoles = new Set([
     "button", "checkbox", "combobox", "link", "menuitem", "slider",
@@ -84,7 +85,29 @@
     if (!context) throw new Error("OmniBrowser scanner context is not configured");
     const ref = `f${context.frame}.d${context.epoch}.n${tokenFor(element)}`;
     refs.set(ref, new WeakRef(element));
+    fingerprints.set(ref, fingerprintFor(element));
     return ref;
+  };
+
+  const fingerprintFor = (element) => ({
+    role: roleFor(element),
+    name: labelText(element),
+    tag: element.tagName,
+    id: element.id || "",
+    nameAttr: element.getAttribute("name") || "",
+    type: element.getAttribute("type") || "",
+    form: element.form?.id || ""
+  });
+
+  const fingerprintMatches = (element, fingerprint) => {
+    const current = fingerprintFor(element);
+    if (current.role !== fingerprint.role || current.name !== fingerprint.name || current.tag !== fingerprint.tag) {
+      return false;
+    }
+    for (const key of ["id", "nameAttr", "type", "form"]) {
+      if (fingerprint[key] && current[key] !== fingerprint[key]) return false;
+    }
+    return true;
   };
 
   const candidates = () => {
@@ -102,6 +125,17 @@
       }
     }
     return result;
+  };
+
+  const liveElement = (ref) => {
+    const direct = refs.get(ref)?.deref();
+    if (direct?.isConnected) return direct;
+    const fingerprint = fingerprints.get(ref);
+    if (!fingerprint) return null;
+    const matches = candidates().filter((element) => fingerprintMatches(element, fingerprint));
+    if (matches.length !== 1) return null;
+    refs.set(ref, new WeakRef(matches[0]));
+    return matches[0];
   };
 
   const agent = {
@@ -127,11 +161,11 @@
       return { revision, nodes };
     },
     resolve(ref) {
-      const element = refs.get(ref)?.deref();
+      const element = liveElement(ref);
       return Boolean(element?.isConnected);
     },
     resolveElement(ref) {
-      const element = refs.get(ref)?.deref();
+      const element = liveElement(ref);
       return element?.isConnected ? element : null;
     }
   };
@@ -142,6 +176,8 @@
     attributes: true,
     characterData: true
   });
+  document.addEventListener("input", () => { revision += 1; }, true);
+  document.addEventListener("change", () => { revision += 1; }, true);
 
   window[sentinel] = agent;
 })();

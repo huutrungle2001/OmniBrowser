@@ -20,7 +20,7 @@ from .contracts import (
 from .page_manager import PageManager, manager_for_page
 
 
-_ACTIONS = {"click", "fill", "select", "press"}
+_ACTIONS = {"check", "click", "fill", "select", "press"}
 
 
 def _get_manager(page: Page, manager: PageManager | None) -> PageManager:
@@ -92,12 +92,21 @@ def _expectation_met(expect: dict[str, Any], *, before: Any, current: Any, page:
             return False
         handle = manager.resolve_element(page, target_ref)
         visible = bool(handle and handle.is_visible())
+        if isinstance(element, dict) and element.get("enabled") is True:
+            if not handle or bool(handle.is_disabled()):
+                return False
+        if isinstance(element, dict) and element.get("enabled") is False:
+            if handle and not bool(handle.is_disabled()):
+                return False
         if isinstance(element, dict) and element.get("visible") is True and not visible:
             return False
         if isinstance(element, dict) and element.get("visible") is False and visible:
             return False
         if isinstance(element, dict) and element.get("text_present"):
             if not handle or str(element["text_present"]) not in str(handle.inner_text()):
+                return False
+        if isinstance(element, dict) and "checked" in element:
+            if not handle or bool(handle.is_checked()) != bool(element["checked"]):
                 return False
     return True
 
@@ -135,6 +144,8 @@ def act(
     try:
         if action == "click":
             handle.click(timeout=timeout_ms)
+        elif action == "check":
+            handle.check(timeout=timeout_ms)
         elif action == "fill":
             if value is None:
                 raise ValueError("fill requires value")

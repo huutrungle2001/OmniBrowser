@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import time
 from typing import Any
 
 from PIL import Image
@@ -152,22 +153,53 @@ def runBrowserCode(
     limit = 2000 if mode == "read" else 10000
     if timeout_ms is not None:
         limit = min(max(int(timeout_ms), 1), 10000)
-    expression = """
-    async ({source, timeout}) => {
-      const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
-      const fn = new AsyncFunction(source);
+
+    expression = f"""
+    (async () => {{
+      const AsyncFunction = Object.getPrototypeOf(async function(){{}}).constructor;
+      const fn = new AsyncFunction({json.dumps(script)});
       return await Promise.race([
         fn(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('browser code timeout')), timeout))
+        new Promise((_, reject) => setTimeout(() => reject(new Error('browser code timeout')), {limit}))
       ]);
-    }
+    }})()
     """
+    started = time.monotonic()
+    session = page.context.new_cdp_session(page)
     try:
-        value = page.evaluate(expression, {"source": script, "timeout": limit})
+        response = session.send(
+            "Runtime.evaluate",
+            {
+                "expression": expression,
+                "awaitPromise": True,
+                "returnByValue": True,
+                "timeout": limit,
+            },
+        )
     except Exception as error:
-        if "timeout" in str(error).lower() or "exceeded" in str(error).lower():
+        elapsed_ms = (time.monotonic() - started) * 1000
+        error_text = str(error).lower()
+        if (
+            "timeout" in error_text
+            or "timed out" in error_text
+            or "exceeded" in error_text
+            or ("internal error" in error_text and elapsed_ms >= limit * 0.75)
+        ):
             raise ActionTimeoutError(f"runBrowserCode timeout ({limit}ms)") from error
         raise
+    finally:
+        session.detach()
+
+    exception_details = response.get("exceptionDetails")
+    if exception_details:
+        exception = exception_details.get("exception") or {}
+        error_text = str(exception.get("description") or exception_details.get("text") or "browser code failed")
+        if "browser code timeout" in error_text.lower():
+            raise ActionTimeoutError(f"runBrowserCode timeout ({limit}ms)")
+        raise RuntimeError(error_text)
+
+    remote_value = response.get("result", {})
+    value = remote_value.get("value")
     encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
     if len(encoded) > MAX_OUTPUT_BYTES:
         raise ValueError(f"runBrowserCode output exceeds 32 KB limit ({len(encoded)} bytes)")
@@ -205,6 +237,7 @@ def inspectVisual(
 
 
 def _save_crop(page: Page, handle: Any, output_path: str, padding: int) -> None:
+    handle.scroll_into_view_if_needed()
     box = handle.bounding_box()
     if not box:
         raise StaleRefError("Target has no bounding box; call observe() and retry")

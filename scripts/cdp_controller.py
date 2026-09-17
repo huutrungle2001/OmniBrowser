@@ -4,36 +4,46 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
+import socket
+import struct
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+from urllib.request import urlopen
 
 try:
     from browser_core.contracts import (
         ActionTimeoutError,
+        DOMNodeRef,
         ExitCode,
         OmniBrowserError,
+        ObserveResult,
+        ObservedNode,
         TargetNotFoundError,
     )
-    from browser_core.engine import act
-    from browser_core.page_manager import PageManager
-    from browser_core.primitives import inspect, inspectVisual, runBrowserCode
 except ModuleNotFoundError:  # Allow invoking this file directly from a checkout.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
     from browser_core.contracts import (  # noqa: E402
         ActionTimeoutError,
+        DOMNodeRef,
         ExitCode,
         OmniBrowserError,
+        ObserveResult,
+        ObservedNode,
         TargetNotFoundError,
     )
-    from browser_core.engine import act  # noqa: E402
-    from browser_core.page_manager import PageManager  # noqa: E402
-    from browser_core.primitives import inspect, inspectVisual, runBrowserCode  # noqa: E402
 
 
 DEFAULT_CDP_URL = os.environ.get("CDP_URL", "http://127.0.0.1:17082")
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _is_loopback_host(hostname: str | None) -> bool:
+    return bool(hostname and hostname.lower() in _LOOPBACK_HOSTS)
 
 
 def _legacy_context_and_page(browser, url_substring=None):
@@ -104,6 +114,8 @@ def cmd_screenshot(args):
 
 
 def _manager_page(args):
+    from browser_core.page_manager import PageManager
+
     manager = PageManager(args.cdp_url)
     manager.connect()
     page = manager.primary_page()
@@ -127,6 +139,10 @@ def _json(value: Any) -> None:
 
 
 def cmd_observe(args):
+    fast_result = _fast_observe(args)
+    if fast_result is not None:
+        _json(fast_result.to_dict())
+        return
     manager, page = _manager_page(args)
     try:
         result = manager.observe(page, max_elements=args.max_elements, frame=_frame(manager, page, args.frame))
@@ -146,6 +162,8 @@ def _read_json(value: Any, filename: str | None, default: Any = None) -> Any:
 
 
 def cmd_act(args):
+    from browser_core.engine import act
+
     payload = _read_json(args.json, args.file, {})
     operation = args.op or payload.get("op") or payload.get("action")
     ref = args.ref or payload.get("ref") or (payload.get("target") or {}).get("ref")
@@ -161,6 +179,8 @@ def cmd_act(args):
 
 
 def cmd_inspect(args):
+    from browser_core.primitives import inspect
+
     manager, page = _manager_page(args)
     try:
         result = inspect(manager, page, mode=args.mode, ref=args.ref, depth=args.depth)
@@ -173,6 +193,8 @@ def cmd_inspect(args):
 
 
 def cmd_run_code(args):
+    from browser_core.primitives import runBrowserCode
+
     script = args.script
     if args.script_file:
         script = Path(args.script_file).read_text(encoding="utf-8")
@@ -186,6 +208,8 @@ def cmd_run_code(args):
 
 
 def cmd_visual(args):
+    from browser_core.primitives import inspectVisual
+
     if not args.ref:
         raise ValueError("visual requires --ref/--scope-ref")
     manager, page = _manager_page(args)
@@ -193,6 +217,224 @@ def cmd_visual(args):
         _json(inspectVisual(manager, page, ref=args.ref, output_path=args.output, padding=args.padding))
     finally:
         manager.close()
+
+
+class _RawCDP:
+    """Tiny synchronous CDP transport used to avoid a Node driver for observe."""
+
+    def __init__(self, websocket_url: str):
+        parsed = urlsplit(websocket_url)
+        if parsed.scheme != "ws" or not _is_loopback_host(parsed.hostname):
+            raise ValueError("Only local ws CDP endpoints are supported")
+        try:
+            port = parsed.port or 80
+        except ValueError as error:
+            raise ValueError("Invalid local ws CDP endpoint") from error
+        self._socket = socket.create_connection((parsed.hostname, port), timeout=10)
+        self._socket.settimeout(10)
+        self._recv_buffer = bytearray()
+        self._closed = False
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        path = parsed.path or "/"
+        if parsed.query:
+            path += "?" + parsed.query
+        host_header = parsed.hostname
+        if ":" in host_header:
+            host_header = f"[{host_header}]"
+        request = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host_header}:{port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n\r\n"
+        ).encode("ascii")
+        self._socket.sendall(request)
+        headers = self._read_until(b"\r\n\r\n")
+        if not headers.startswith(b"HTTP/1.1 101"):
+            self._socket.close()
+            raise RuntimeError("CDP WebSocket handshake failed")
+        self._next_id = 0
+
+    def _read_until(self, marker: bytes) -> bytes:
+        while True:
+            marker_index = self._recv_buffer.find(marker)
+            if marker_index >= 0:
+                end = marker_index + len(marker)
+                data = bytes(self._recv_buffer[:end])
+                del self._recv_buffer[:end]
+                return data
+            chunk = self._socket.recv(4096)
+            if not chunk:
+                raise ConnectionError("CDP connection closed")
+            self._recv_buffer.extend(chunk)
+
+    def _recv_exact(self, size: int) -> bytes:
+        while len(self._recv_buffer) < size:
+            chunk = self._socket.recv(size - len(self._recv_buffer))
+            if not chunk:
+                raise ConnectionError("CDP connection closed")
+            self._recv_buffer.extend(chunk)
+        data = bytes(self._recv_buffer[:size])
+        del self._recv_buffer[:size]
+        return data
+
+    def _send_frame(self, payload: bytes, opcode: int = 1) -> None:
+        length = len(payload)
+        if length < 126:
+            header = bytes((0x80 | opcode, 0x80 | length))
+        elif length < 65536:
+            header = bytes((0x80 | opcode, 0x80 | 126)) + struct.pack("!H", length)
+        else:
+            header = bytes((0x80 | opcode, 0x80 | 127)) + struct.pack("!Q", length)
+        mask = os.urandom(4)
+        masked = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
+        self._socket.sendall(header + mask + masked)
+
+    def _read_frame(self) -> tuple[int, bytes]:
+        first, second = self._recv_exact(2)
+        self._last_frame_fin = bool(first & 0x80)
+        if first & 0x70:
+            raise RuntimeError("Unsupported WebSocket extension")
+        length = second & 0x7F
+        if length == 126:
+            length = struct.unpack("!H", self._recv_exact(2))[0]
+        elif length == 127:
+            length = struct.unpack("!Q", self._recv_exact(8))[0]
+            if length & (1 << 63):
+                raise RuntimeError("Invalid WebSocket frame length")
+        opcode = first & 0x0F
+        if opcode not in (0, 1, 2, 8, 9, 10):
+            raise RuntimeError("Unsupported WebSocket opcode")
+        if opcode >= 8 and (not self._last_frame_fin or length > 125):
+            raise RuntimeError("Invalid WebSocket control frame")
+        masked = second & 0x80
+        mask = self._recv_exact(4) if masked else b""
+        payload = bytearray(self._recv_exact(length))
+        if mask:
+            payload = bytearray(value ^ mask[index % 4] for index, value in enumerate(payload))
+        return opcode, bytes(payload)
+
+    def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        self._next_id += 1
+        request_id = self._next_id
+        self._send_frame(json.dumps({"id": request_id, "method": method, "params": params or {}}).encode())
+        fragmented_opcode = None
+        fragmented_payload = bytearray()
+        while True:
+            opcode, payload = self._read_frame()
+            frame_fin = self._last_frame_fin
+            if opcode == 9:
+                self._send_frame(payload, opcode=10)
+                continue
+            if opcode == 10:
+                continue
+            if opcode == 8:
+                if not self._closed:
+                    self._send_frame(payload, opcode=8)
+                    self._closed = True
+                raise ConnectionError("CDP connection closed")
+            if opcode == 0:
+                if fragmented_opcode is None:
+                    raise RuntimeError("Unexpected WebSocket continuation frame")
+                fragmented_payload.extend(payload)
+                if not frame_fin:
+                    continue
+                opcode = fragmented_opcode
+                payload = bytes(fragmented_payload)
+                fragmented_opcode = None
+                fragmented_payload.clear()
+            elif opcode in (1, 2):
+                if fragmented_opcode is not None:
+                    raise RuntimeError("Unexpected WebSocket data frame")
+                if not frame_fin:
+                    fragmented_opcode = opcode
+                    fragmented_payload = bytearray(payload)
+                    continue
+            else:
+                continue
+            if opcode != 1:
+                continue
+            response = json.loads(payload)
+            if response.get("id") == request_id:
+                if "error" in response:
+                    raise RuntimeError(str(response["error"]))
+                return response
+
+    def close(self) -> None:
+        if not self._closed:
+            try:
+                self._send_frame(b"", opcode=8)
+            except OSError:
+                pass
+            finally:
+                self._closed = True
+        try:
+            self._socket.close()
+        except OSError:
+            pass
+
+
+def _fast_observe(args) -> ObserveResult | None:
+    """Use direct CDP for the common main-frame observe path.
+
+    The Playwright implementation remains the fallback for matched tabs and
+    frame-scoped observations, preserving the full feature path.
+    """
+    if getattr(args, "match", None) or getattr(args, "frame", None):
+        return None
+    try:
+        parsed = urlsplit(args.cdp_url)
+        if parsed.scheme not in {"http", "https"} or not _is_loopback_host(parsed.hostname):
+            return None
+        endpoint = f"{parsed.scheme}://{parsed.netloc}/json/list"
+        with urlopen(endpoint, timeout=10) as response:
+            tabs = json.load(response)
+        target = next(tab for tab in tabs if tab.get("type") == "page" and tab.get("webSocketDebuggerUrl"))
+        agent_source = Path(__file__).resolve().parents[1].joinpath("scripts", "dom_agent.js").read_text()
+        cdp = _RawCDP(target["webSocketDebuggerUrl"])
+        try:
+            cdp.request("Runtime.evaluate", {"expression": agent_source, "returnByValue": True})
+            cdp.request(
+                "Runtime.evaluate",
+                {
+                    "expression": "window[Symbol.for('__OMNI_DOM_AGENT__')].setContext('0', '1')",
+                    "returnByValue": True,
+                },
+            )
+            response = cdp.request(
+                "Runtime.evaluate",
+                {
+                    "expression": f"window[Symbol.for('__OMNI_DOM_AGENT__')].scan({max(1, int(args.max_elements))})",
+                    "returnByValue": True,
+                    "userGesture": False,
+                },
+            )
+        finally:
+            cdp.close()
+        raw = response["result"]["result"].get("value")
+        nodes = [
+            ObservedNode(
+                ref=DOMNodeRef.parse(node["ref"]),
+                role=node["role"],
+                name=node["name"],
+                bounds=tuple(node["bounds"]),
+                visible=node["visible"],
+                interactive=node["interactive"],
+                disabled=node.get("disabled", False),
+                value=node.get("value"),
+            )
+            for node in raw["nodes"]
+        ]
+        return ObserveResult(
+            page_url=target.get("url", ""),
+            frame_id="f0",
+            document_epoch="d1",
+            revision=raw["revision"],
+            tree=nodes[: max(1, int(args.max_elements))],
+        )
+    except Exception:
+        return None
 
 
 def _parser():
