@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import fnmatch
 from pathlib import Path
 import re
 import time
-from typing import Any
+from typing import Any, Callable, Iterable
 
 from PIL import Image
 from io import BytesIO
@@ -61,6 +62,153 @@ def _bounded(value: Any, *, limit: int = MAX_OUTPUT_BYTES) -> str:
         return text
     raw = text.encode("utf-8")[:limit]
     return raw.decode("utf-8", errors="ignore")
+
+
+def _network_url_matches(url: str, pattern: str | re.Pattern[str] | None) -> bool:
+    """Match either a regular expression or a shell-style URL glob."""
+    if pattern is None:
+        return True
+    if hasattr(pattern, "search"):
+        return bool(pattern.search(url))
+    value = str(pattern)
+    try:
+        if re.search(value, url):
+            return True
+    except re.error:
+        # A malformed regex can still be a useful literal/glob filter.
+        pass
+    return fnmatch.fnmatch(url, value)
+
+
+def _network_body_value(body: str, *, max_body_bytes: int) -> tuple[str | None, bool, Any]:
+    """Return a bounded body, truncation state, and parsed JSON when possible."""
+    encoded = body.encode("utf-8")
+    if len(encoded) > max_body_bytes:
+        bounded = encoded[:max_body_bytes].decode("utf-8", errors="ignore")
+        return bounded, True, None
+    try:
+        parsed = json.loads(body)
+    except (TypeError, ValueError):
+        parsed = None
+    return body, False, parsed
+
+
+def capture_network_traffic(
+    first: PageManager | Page,
+    second: Page | None = None,
+    *,
+    action: Callable[[], Any] | None = None,
+    page_action: Callable[[], Any] | None = None,
+    url_pattern: str | re.Pattern[str] | None = None,
+    resource_types: Iterable[str] | None = None,
+    max_entries: int = 100,
+    max_body_bytes: int = 64 * 1024,
+    timeout_ms: int = 1000,
+) -> dict[str, Any]:
+    """Capture bounded JSON/API responses while a page action runs.
+
+    The primitive uses a short-lived CDP ``Network`` session. Response events
+    are collected first and bodies are fetched after the action, which keeps
+    the event callback lightweight and avoids re-entrant CDP calls.
+    """
+    if second is not None and callable(second) and action is None and page_action is None:
+        action = second  # type: ignore[assignment]
+        second = None
+    _manager, page = _args(first, second)
+    if action is not None and page_action is not None:
+        raise ValueError("capture_network_traffic accepts action or page_action, not both")
+    callback = action or page_action
+    max_entries = min(max(int(max_entries), 1), 1000)
+    max_body_bytes = min(max(int(max_body_bytes), 0), 1024 * 1024)
+    timeout_ms = min(max(int(timeout_ms), 0), 10000)
+    wanted_types = {str(value).lower() for value in (resource_types or {"xhr", "fetch"})}
+    session = page.context.new_cdp_session(page)
+    responses: list[dict[str, Any]] = []
+    requests: dict[str, dict[str, Any]] = {}
+
+    def on_request(event: dict[str, Any]) -> None:
+        request = event.get("request") or {}
+        request_id = str(event.get("requestId", ""))
+        if request_id:
+            requests[request_id] = {
+                "method": request.get("method", "GET"),
+                "url": request.get("url", ""),
+                "resource_type": event.get("type", ""),
+            }
+
+    def on_response(event: dict[str, Any]) -> None:
+        response = event.get("response") or {}
+        request_id = str(event.get("requestId", ""))
+        resource_type = str(event.get("type", "")).lower()
+        url = str(response.get("url", ""))
+        if resource_type not in wanted_types or not _network_url_matches(url, url_pattern):
+            return
+        if len(responses) >= max_entries:
+            return
+        headers = response.get("headers") or {}
+        content_type = str(headers.get("content-type", headers.get("Content-Type", "")))
+        responses.append(
+            {
+                "request_id": request_id,
+                "url": url,
+                "method": requests.get(request_id, {}).get("method", "GET"),
+                "status": response.get("status"),
+                "status_text": response.get("statusText", ""),
+                "mime_type": response.get("mimeType", ""),
+                "content_type": content_type,
+                "resource_type": resource_type,
+                "headers": headers,
+                "_body_pending": True,
+            }
+        )
+
+    action_result: Any = None
+    action_error: BaseException | None = None
+    try:
+        session.on("Network.requestWillBeSent", on_request)
+        session.on("Network.responseReceived", on_response)
+        session.send("Network.enable")
+        if callback is not None:
+            try:
+                action_result = callback()
+            except BaseException as error:  # Preserve the action error in the result.
+                action_error = error
+        if timeout_ms:
+            page.wait_for_timeout(timeout_ms)
+        for item in responses:
+            item.pop("_body_pending", None)
+            try:
+                body_result = session.send("Network.getResponseBody", {"requestId": item["request_id"]})
+                body = str(body_result.get("body", ""))
+                bounded, truncated, parsed = _network_body_value(body, max_body_bytes=max_body_bytes)
+                item["body"] = bounded
+                item["body_truncated"] = truncated
+                if parsed is not None:
+                    item["json"] = parsed
+                    item["body_json"] = parsed
+            except Exception as error:
+                item["body"] = None
+                item["body_truncated"] = False
+                item["body_error"] = str(error)
+    finally:
+        try:
+            session.send("Network.disable")
+        except Exception:
+            pass
+        session.detach()
+
+    result: dict[str, Any] = {
+        "ok": action_error is None,
+        "requests": responses,
+        "responses": responses,
+        "count": len(responses),
+        "truncated": len(responses) >= max_entries,
+    }
+    if action_result is not None:
+        result["action_result"] = action_result
+    if action_error is not None:
+        result["action_error"] = {"type": type(action_error).__name__, "message": str(action_error)}
+    return result
 
 
 def inspect(

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from dataclasses import asdict, is_dataclass
 import json
 import os
 import socket
@@ -215,6 +216,148 @@ def cmd_visual(args):
     manager, page = _manager_page(args)
     try:
         _json(inspectVisual(manager, page, ref=args.ref, output_path=args.output, padding=args.padding))
+    finally:
+        manager.close()
+
+
+def _recipe_store(args):
+    """Build the procedural store without connecting to a browser."""
+    from browser_core.recipes import RecipeStore
+
+    recipe_dir = Path(getattr(args, "recipes_dir", None) or Path(__file__).resolve().parents[1] / "recipes")
+    # RecipeStore's public constructor is intentionally accepted in both the
+    # keyword and positional forms used by early v2 recipe implementations.
+    try:
+        return RecipeStore(recipe_dir=recipe_dir)
+    except TypeError:
+        try:
+            return RecipeStore(recipes_dir=recipe_dir)
+        except TypeError:
+            return RecipeStore(recipe_dir)
+
+
+def _recipe_value(value: Any) -> Any:
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if is_dataclass(value):
+        return asdict(value)
+    if isinstance(value, dict):
+        return {str(key): _recipe_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_recipe_value(item) for item in value]
+    if hasattr(value, "__dict__"):
+        return {key: _recipe_value(item) for key, item in vars(value).items() if not key.startswith("_")}
+    return value
+
+
+def _store_recipes(store, url: str | None = None) -> list[Any]:
+    """Use the store's public listing/matching API and normalize its result."""
+    if url:
+        for name in ("matching", "match", "list_matching", "list_recipes"):
+            method = getattr(store, name, None)
+            if method is None:
+                continue
+            for kwargs in ({"url": url}, {"active_url": url}, {}):
+                try:
+                    result = method(**kwargs)
+                except TypeError:
+                    continue
+                if result is not None:
+                    values = list(result) if not isinstance(result, dict) else list(result.values())
+                    if name in {"list_recipes", "list_matching"} and not kwargs:
+                        continue
+                    return values
+    for name in ("list_recipes", "list", "all"):
+        method = getattr(store, name, None)
+        if method is None:
+            continue
+        try:
+            result = method()
+        except TypeError:
+            continue
+        if result is not None:
+            return list(result) if not isinstance(result, dict) else list(result.values())
+    values = getattr(store, "recipes", getattr(store, "_recipes", []))
+    if isinstance(values, dict):
+        values = values.values()
+    values = list(values)
+    if url:
+        matcher = getattr(store, "matches", None)
+        if matcher:
+            values = [item for item in values if matcher(item, url)]
+    return values
+
+
+def _store_get(store, recipe_id: str) -> Any:
+    for name in ("get", "get_recipe", "find"):
+        method = getattr(store, name, None)
+        if method is None:
+            continue
+        try:
+            result = method(recipe_id)
+        except (KeyError, LookupError):
+            result = None
+        if result is not None:
+            return result
+    for recipe in _store_recipes(store):
+        data = _recipe_value(recipe)
+        if data.get("id") == recipe_id:
+            return recipe
+    raise ValueError(f"Recipe not found: {recipe_id}")
+
+
+def cmd_recipe_list(args):
+    store = _recipe_store(args)
+    recipes = _store_recipes(store, args.url)
+    _json([_recipe_value(recipe) for recipe in recipes])
+
+
+def cmd_recipe_show(args):
+    store = _recipe_store(args)
+    _json(_recipe_value(_store_get(store, args.recipe_id)))
+
+
+def _recipe_engine(manager, store=None):
+    from browser_core.recipes import RecipeEngine
+
+    for kwargs in ({"store": store}, {"manager": manager, "store": store}, {"page_manager": manager, "store": store}, {}):
+        try:
+            return RecipeEngine(**kwargs)
+        except TypeError:
+            continue
+    return RecipeEngine(manager)
+
+
+def _execute_recipe(engine, recipe, page, params):
+    execute = getattr(engine, "execute")
+    for kwargs in (
+        {"recipe": recipe, "page": page, "params": params},
+        {"recipe": recipe, "page": page, "parameters": params},
+    ):
+        try:
+            return execute(**kwargs)
+        except TypeError:
+            continue
+    for arguments in ((recipe, page, params), (recipe, page), (recipe, params)):
+        try:
+            return execute(*arguments)
+        except TypeError:
+            continue
+    raise TypeError("RecipeEngine.execute has an unsupported public signature")
+
+
+def cmd_recipe_run(args):
+    params = _read_json(args.params, None, {}) or {}
+    if not isinstance(params, dict):
+        raise ValueError("recipe run --params must be a JSON object")
+    store = _recipe_store(args)
+    recipe = _store_get(store, args.recipe_id)
+    manager, page = _manager_page(args)
+    try:
+        result = _execute_recipe(_recipe_engine(manager, store), recipe, page, params)
+        _json(_recipe_value(result))
     finally:
         manager.close()
 
@@ -460,6 +603,18 @@ def _parser():
     p.add_argument("--script"); p.add_argument("--script-file"); p.add_argument("--mode", choices=["read", "write"], default="read"); p.add_argument("--timeout-ms", type=int)
     p = sub.add_parser("visual", aliases=["inspectVisual"], help="Capture a targeted visual crop")
     p.add_argument("--ref", "--scope-ref", dest="ref"); p.add_argument("--output"); p.add_argument("--padding", type=int, default=20)
+    p = sub.add_parser("recipe", help="Use a stored procedural browser recipe")
+    recipe_sub = p.add_subparsers(dest="recipe_command", required=True)
+    p_list = recipe_sub.add_parser("list", help="List available recipes")
+    p_list.add_argument("--url", default=None, help="Only list recipes matching this URL")
+    p_list.add_argument("--recipes-dir", default=None, help="Recipe directory (defaults to ./recipes)")
+    p_show = recipe_sub.add_parser("show", help="Show recipe steps and health metadata")
+    p_show.add_argument("recipe_id")
+    p_show.add_argument("--recipes-dir", default=None, help="Recipe directory (defaults to ./recipes)")
+    p_run = recipe_sub.add_parser("run", help="Execute a stored recipe against the active tab")
+    p_run.add_argument("recipe_id")
+    p_run.add_argument("--params", nargs="?", const="{}", default="{}", help="JSON object of recipe parameters")
+    p_run.add_argument("--recipes-dir", default=None, help="Recipe directory (defaults to ./recipes)")
     return parser
 
 
@@ -467,6 +622,8 @@ def main(argv=None):
     args = _parser().parse_args(argv)
     try:
         command = {"runBrowserCode": "run-code", "inspectVisual": "visual"}.get(args.command, args.command)
+        if command == "recipe":
+            return globals()[f"cmd_recipe_{args.recipe_command}"](args)
         return globals()[f"cmd_{command.replace('-', '_')}"](args)
     except (OmniBrowserError, TargetNotFoundError, ActionTimeoutError) as error:
         print(str(error), file=sys.stderr)

@@ -1,0 +1,12 @@
+{
+  "id": "two_factor_auth",
+  "name": "Standard two-factor authentication",
+  "description": "Enter an authentication code and submit the verification step.",
+  "domain_pattern": ["https://*/login*", "https://*/auth/*"],
+  "steps": [
+    {"action": "fill", "target": "input[name='code'], input[autocomplete='one-time-code']", "value": "{{code}}"},
+    {"action": "click", "target": "button[type='submit'], button:has-text('Verify')"}
+  ],
+  "validation": {"text_present": "verified"},
+  "metadata": {"version": "1.0", "success_count": 0, "failure_count": 0, "last_failure_reason": null, "failure_ledger": []}
+}

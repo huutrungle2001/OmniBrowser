@@ -1,0 +1,13 @@
+{
+  "id": "standard_enrolment_form",
+  "name": "Standard enrolment form",
+  "description": "Fill and submit a common enrolment form.",
+  "domain_pattern": ["http://*/*enrol*", "https://*/*enrol*"],
+  "steps": [
+    {"action": "fill", "target": "input[name='name'], input[name='full_name']", "value": "{{name}}"},
+    {"action": "select", "target": "select[name='course']", "value": "{{course}}"},
+    {"action": "click", "target": "button[type='submit'], button:has-text('Submit')"}
+  ],
+  "validation": {"text_present": "submitted"},
+  "metadata": {"version": "1.0", "success_count": 0, "failure_count": 0, "last_failure_reason": null, "failure_ledger": []}
+}
