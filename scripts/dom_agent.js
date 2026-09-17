@@ -129,6 +129,10 @@
     resolve(ref) {
       const element = refs.get(ref)?.deref();
       return Boolean(element?.isConnected);
+    },
+    resolveElement(ref) {
+      const element = refs.get(ref)?.deref();
+      return element?.isConnected ? element : null;
     }
   };
 

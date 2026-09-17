@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
+import weakref
 
 from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_playwright
 
@@ -65,6 +66,7 @@ class PageManager:
         session.send("Page.enable")
         session.send("Page.addScriptToEvaluateOnNewDocument", {"source": self.agent_source})
         self._sessions[page] = session
+        _MANAGERS[page] = self
         page.on("framenavigated", self._on_frame_navigated)
         for frame in page.frames:
             self._frame_state(frame)
@@ -124,6 +126,23 @@ class PageManager:
             str(ref),
         ))
 
+    def resolve_element(self, page: Page, ref: DOMNodeRef):
+        """Resolve an opaque reference to its live ElementHandle, if present."""
+        frame = self._frame_for_token(page, ref.frame)
+        state = self._frame_state(frame)
+        if ref.epoch != str(state.epoch):
+            return None
+        self._bootstrap(frame)
+        handle = frame.evaluate_handle(
+            """(value) => window[Symbol.for('__OMNI_DOM_AGENT__')].resolveElement(value)""",
+            str(ref),
+        )
+        try:
+            return handle.as_element()
+        finally:
+            if handle.as_element() is None:
+                handle.dispose()
+
     def _frame_for_token(self, page: Page, token: str):
         for frame in page.frames:
             if self._frame_state(frame).token == token:
@@ -152,3 +171,11 @@ class PageManager:
             )
         except Exception as error:
             raise TargetNotFoundError(f"Could not bootstrap scanner in frame: {frame.url}") from error
+
+
+_MANAGERS: "weakref.WeakKeyDictionary[Page, PageManager]" = weakref.WeakKeyDictionary()
+
+
+def manager_for_page(page: Page) -> PageManager | None:
+    """Return the manager that installed the scanner on ``page``."""
+    return _MANAGERS.get(page)

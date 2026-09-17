@@ -115,3 +115,24 @@ class ActResult:
     revision: int
     delta: StateDelta = field(default_factory=StateDelta)
     ok: bool = True
+    document_epoch: str | None = None
+    action_duration_ms: int = 0
+
+    @property
+    def state_delta(self) -> dict[str, Any]:
+        """Compact state metadata kept alongside the detailed DOM delta."""
+        return {
+            "revision": self.revision,
+            "document_epoch": self.document_epoch,
+        }
+
+    @property
+    def elapsed_ms(self) -> int:
+        return self.action_duration_ms
+
+    def to_dict(self) -> dict[str, Any]:
+        result = asdict(self)
+        result["delta"] = asdict(self.delta)
+        result["state_delta"] = self.state_delta
+        result["elapsed_ms"] = self.action_duration_ms
+        return result

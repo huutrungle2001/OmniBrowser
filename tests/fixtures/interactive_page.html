@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>OmniBrowser interactive fixture</title>
+  <style>
+    :root { color-scheme: light; font: 16px sans-serif; }
+    body { margin: 0; padding: 24px; }
+    main { width: 620px; }
+    label { display: block; margin: 12px 0 4px; }
+    input, select, button { box-sizing: border-box; font: inherit; padding: 8px; }
+    input, select { width: 280px; }
+    button { margin: 14px 8px 0 0; }
+    #status { min-height: 24px; margin-top: 18px; }
+    #visual-target { width: 180px; height: 90px; margin-top: 22px; padding: 12px;
+      background: #f2b544; border: 3px solid #513b14; }
+    #captcha { margin-top: 22px; padding: 18px; width: 260px; background: #eee;
+      border: 2px solid #777; }
+    #hidden-control { display: none; }
+  </style>
+</head>
+<body>
+  <main id="app">
+    <h1>Interactive form</h1>
+    <form id="enrolment-form">
+      <label for="name">Name</label>
+      <input id="name" name="name" autocomplete="off" value="">
+
+      <label for="course">Course</label>
+      <select id="course" name="course">
+        <option value="">Choose a course</option>
+        <option value="browser-systems">Browser Systems</option>
+        <option value="semantic-dom">Semantic DOM</option>
+      </select>
+
+      <button id="save" type="button">Save details</button>
+      <button id="next" type="button">Continue to stage 2</button>
+      <button id="replace" type="button">Replace form</button>
+      <button id="submit" type="submit">Submit with Enter</button>
+      <button id="hidden-control" type="button">Hidden control</button>
+    </form>
+
+    <p id="status" aria-live="polite">Ready</p>
+    <div id="visual-target" role="img" aria-label="Visual target" tabindex="0">Targeted visual evidence</div>
+    <div id="captcha" role="button" aria-label="CAPTCHA verification">CAPTCHA challenge - human verification required</div>
+    <iframe title="Fixture child frame" srcdoc="<!doctype html><html><body><button id='frame-button'>Frame action</button></body></html>"></iframe>
+  </main>
+  <script>
+    const name = document.querySelector('#name');
+    const course = document.querySelector('#course');
+    const status = document.querySelector('#status');
+    const announce = () => {
+      status.textContent = `Draft: ${name.value || 'unnamed'} / ${course.selectedOptions[0]?.textContent || 'no course'}`;
+    };
+    name.addEventListener('input', announce);
+    course.addEventListener('change', announce);
+    document.querySelector('#save').addEventListener('click', () => {
+      status.textContent = `Saved: ${name.value || 'unnamed'}`;
+    });
+    document.querySelector('#next').addEventListener('click', () => {
+      history.pushState({}, '', `${location.pathname}?step=2`);
+      status.textContent = 'Enrolment Stage 2';
+    });
+    document.querySelector('#replace').addEventListener('click', () => {
+      const old = document.querySelector('#name');
+      const replacement = old.cloneNode(true);
+      replacement.value = '';
+      old.replaceWith(replacement);
+      status.textContent = 'Form replaced';
+    });
+    document.querySelector('#enrolment-form').addEventListener('submit', (event) => {
+      event.preventDefault();
+      status.textContent = `Submitted: ${name.value || 'unnamed'}`;
+    });
+    if (new URLSearchParams(location.search).get('captcha') !== '1') {
+      document.querySelector('#captcha').remove();
+    }
+  </script>
+</body>
+</html>
