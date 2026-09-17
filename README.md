@@ -63,29 +63,33 @@ sequenceDiagram
 
 ---
 
-## 📦 Installation & Packaging
+## 📦 Quick Installation
 
-### Option 1: Install as an Antigravity / Gemini CLI Skill (Recommended)
+### ⚡ 1-Line Installation (Antigravity & AI Agent Skill)
 
-To install or link OmniBrowser into your local AI agent skills directory (`~/.gemini/config/skills/omnibrowser`):
+Install OmniBrowser directly into your agent skills directory (`~/.gemini/config/skills/omnibrowser`) with a single command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/huutrungle2001/OmniBrowser/master/install.sh | bash
+```
+
+> **Note**: This automatically installs the latest release, creates the legacy compatibility alias (`browser-automation-cdp`), and makes the skill instantly active for Google Antigravity, Gemini CLI, Claude, and autonomous coding agents.
+
+---
+
+### 🧑‍💻 Option 2: Local Clone & Development Setup
+
+If you want to modify code, add custom recipes, or contribute to OmniBrowser:
 
 ```bash
 # Clone the repository
 git clone https://github.com/huutrungle2001/OmniBrowser.git
 cd OmniBrowser
 
-# Symlink for live development (changes immediately active for agents)
+# Create a live symlink (edits in this directory immediately affect local agents)
 ./install.sh --symlink
 
-# Or copy as a standalone snapshot
-./install.sh --copy
-```
-
-### Option 2: Python Package (Standard Library)
-
-Install OmniBrowser directly into your Python virtual environment:
-
-```bash
+# Install Python package in editable mode
 pip install -e .
 ```
 
