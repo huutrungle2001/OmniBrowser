@@ -89,6 +89,29 @@ Within this repository, **there is ZERO dependency on tmux**. Tmux is solely an 
    - Runs final integration tests in an ephemeral Chrome sandbox.
    - Commits clean changes to Git and authors `.agents/communication/results/<task-id>.md` (`TO: hub`).
 
+### 4.2 Pre-Defined Subagent Catalog & Invocation Templates
+To prevent hallucination, role ambiguity, or ad-hoc prompting, the Lead Agent selects from the formal subagent role profiles located in `.agents/subagents/` when calling `spawn_agent`:
+
+1. **`dom_specialist`** ([`.agents/subagents/dom_specialist.md`](file:///Users/huutrungle2001/Documents/OnGoing/OmniBrowser/.agents/subagents/dom_specialist.md)):
+   - *Role*: In-browser JavaScript engine engineer (`scripts/dom_agent.js`).
+   - *Specialization*: DOM extraction, Shadow DOM traversal, accessibility semantics, token budget filtering ($\le 15\text{ KB}$), reverse ref resolution.
+   - *Spawn Template*: `spawn_agent(prompt="Read role profile .agents/subagents/dom_specialist.md. Implement/refine <target_files> adhering to contracts and budget constraint.")`
+
+2. **`systems_engineer`** ([`.agents/subagents/systems_engineer.md`](file:///Users/huutrungle2001/Documents/OnGoing/OmniBrowser/.agents/subagents/systems_engineer.md)):
+   - *Role*: Python browser systems engineer (`src/browser_core/`).
+   - *Specialization*: Data contracts (`contracts.py`), Playwright CDP connection & frame lifecycle (`page_manager.py`), engine primitives.
+   - *Spawn Template*: `spawn_agent(prompt="Read role profile .agents/subagents/systems_engineer.md. Implement <target_modules> under src/browser_core/ following task spec.")`
+
+3. **`test_architect`** ([`.agents/subagents/test_architect.md`](file:///Users/huutrungle2001/Documents/OnGoing/OmniBrowser/.agents/subagents/test_architect.md)):
+   - *Role*: Ephemeral sandbox test & fixture engineer (`tests/`).
+   - *Specialization*: Isolated Chrome subprocess launcher (`conftest.py`), local HTTP server fixtures, pytest runners, absolute port 17082 live-profile blocking.
+   - *Spawn Template*: `spawn_agent(prompt="Read role profile .agents/subagents/test_architect.md. Author integration test suite in tests/ verifying criteria with zero profile pollution.")`
+
+4. **`internal_reviewer`** ([`.agents/subagents/internal_reviewer.md`](file:///Users/huutrungle2001/Documents/OnGoing/OmniBrowser/.agents/subagents/internal_reviewer.md)):
+   - *Role*: Adversarial clean-room code auditor.
+   - *Specialization*: Audits `git diff <base>..HEAD` with fresh context against task acceptance criteria, checks whitespace hygiene, and uncovers edge cases before handoff.
+   - *Spawn Template*: `spawn_agent(prompt="Read role profile .agents/subagents/internal_reviewer.md. Audit git diff <base_commit>..HEAD against task acceptance criteria.")`
+
 ---
 
 ## 5. Interface with Workbench (Meta-Hub Communication)
