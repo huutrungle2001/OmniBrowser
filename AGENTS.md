@@ -67,109 +67,56 @@ Define success criteria. Loop until verified.
 
 ---
 
-## 4. Multi-Agent System Architecture & The 4 Roles
+## 4. Execution Architecture: Built-in Multi-Agent System
 
-OmniBrowser operates under a strictly coordinated, 4-agent workflow:
+OmniBrowser operates as an autonomous subproject under the supervision of the Workbench Meta-Hub.
+Within this repository, **there is ZERO dependency on tmux**. Tmux is solely an OS-level terminal wrapper used by Workbench/developer to host sessions. Code, scripts, and agents in OmniBrowser must NEVER invoke tmux commands or expect peer tmux sessions.
 
-```text
-                                [omni_hub]
-                 (Master Coordinator & Operator Interface)
-                                    │
-                                    ▼
-                          [omni_orchestrator]
-                     (Task Architect & Contract Gate)
-                                    │
-                         tasks/<id>.md (TASK_READY)
-                                    │
-                                    ▼
-                         [omni_implementer]
-             (Codex Lead: Core Implementation & Chrome Tests)
-                                    │
-                        results/<id>.md (READY_FOR_REVIEW)
-                                    │
-                                    ▼
-                           [omni_reviewer]
-                 (Adversarial Audit & Regression Gate)
-                                    │
-            ┌───────────────────────┴───────────────────────┐
-            ▼                                               ▼
-         APPROVED                                   REVISION_REQUIRED
-            │                                               │
-   [omni_orchestrator & hub]                                [omni_implementer]
-```
-
-### Agent Roster:
-1. **`omni_hub`** (Interactive Master Window): Human operator communication, milestone supervision, global progress monitoring.
-2. **`omni_orchestrator`** (Task Architect): Decomposes `PLAN.md` into falsifiable `.agents/communication/tasks/<task-id>.md` specifications with owned/preserved file scopes.
-3. **`omni_implementer`** (Codex Lead / Supervisory Tech Lead): Operates strictly in a Supervisory & Coordination role. MUST ALWAYS summon worker subagents (`ag/gemini-3.8-flash-high` via `spawn_agent`) to perform code writing, editing, and test authoring. Direct bulk coding on the main thread is strictly forbidden.
-4. **`omni_reviewer`** (Adversarial Quality Gate): Runs in a fresh context, audits git diffs independently, tests backward compatibility, and issues binding approval.
-
-### 4.1 Mandatory Subagent Delegation Invariant (Supervisor-Only Rule)
-- **Zero Direct Coding on Main Thread**: The Implementer Lead (`omni-hub` / `omni_implementer` running `cx/gpt-5.6-terra`) is strictly an **Architect, Supervisor, and Integration Gatekeeper**. It must **NEVER** write or edit implementation code, modules, or test suites directly on its main thread.
-- **Mandatory Subagent Delegation**: For **EVERY** implementation task, `omni_implementer` **MUST**:
-  1. Decompose the task specification into discrete, modular sub-assignments with explicit interface boundaries and input/output contracts.
-  2. Summon worker subagents (`ag/gemini-3.8-flash-high` via `spawn_agent`) to write the code, implement the modules, and create test files.
-  3. Supervise subagent outputs, audit their diffs, and verify adherence to the agreed contracts.
-  4. Execute final sandbox integration tests on ephemeral Chrome.
-  5. Author the Result record, commit clean changes, and dispatch handoff to Reviewer.
-- **Rationale**: Enforces dual-tier token economics (preserving `gpt-5.6-terra` high reasoning for planning/audit while utilizing fast, unlimited `gemini-3.8-flash` threads for code production), eliminates context pollution on the lead agent, and guarantees strict separation of concerns.
+### 4.1 The Primary Lead Agent & Built-in Worker Subagents
+1. **Lead Agent (`cx/gpt-5.6-terra`)**:
+   - Operates strictly as the **Supervisory Architect & Quality Gatekeeper**.
+   - Receives tasks from Workbench via `.agents/communication/tasks/<task-id>.md`.
+   - **MANDATORY SUBAGENT DELEGATION**: The Lead Agent must **NEVER** write or edit bulk implementation code directly on its main thread.
+   - Decomposes the task specification into modular, self-contained sub-assignments with explicit interface boundaries and input/output contracts.
+2. **Worker Subagents (`ag/gemini-3.8-flash-high`)**:
+   - The Lead Agent uses its **native built-in multi-agent tool (`spawn_agent`)** to summon worker subagents.
+   - Subagents perform all code writing, module implementation, refactoring, and test creation.
+   - Multiple subagents can run concurrently for decoupled files (e.g. `dom_agent.js` vs `page_manager.py`).
+3. **Internal Reviewer Subagent**:
+   - Before delivering a task, the Lead Agent can summon an adversarial reviewer subagent (`spawn_agent(role="Reviewer", prompt=...)`) with a fresh context to audit the git diff against acceptance criteria.
+4. **Integration & Delivery**:
+   - The Lead Agent audits subagent diffs and resolves interface discrepancies.
+   - Runs final integration tests in an ephemeral Chrome sandbox.
+   - Commits clean changes to Git and authors `.agents/communication/results/<task-id>.md` (`TO: hub`).
 
 ---
 
-## 5. Operational Protocol & Mandatory Turn Handoff
+## 5. Interface with Workbench (Meta-Hub Communication)
 
-### 5.1 Communication Hygiene & Canonical Roles
-- **Canonical Roles**: Communication records strictly use canonical roles (`hub`, `orchestrator`, `implementer`, `reviewer`). Transport mapping to physical tmux panes (e.g. `omni-hub`, `omni_reviewer`) is handled decoupled by `scripts/notify_agent.sh`.
-- **Authoritative Mechanism**: Durable Markdown records in `.agents/communication/` committed to Git are the **ONLY** source of truth. Tmux notifications are best-effort asynchronous wake-ups.
-- **Zero Raw Terminal Dumps**: Communication records must use structured Markdown evidence tables summarizing command, exit code, and high-level outcome.
-- **Context Resets (`/new`)**: Reviewer sessions must execute context resets (`/new`) to ensure clean-room, adversarial verification without inheriting implementer assumptions.
+Communication between OmniBrowser and Workbench is strictly **asynchronous, file-based, and committed to Git**:
+
+### 5.1 Communication Schema
+- **Tasks (Inbound from Hub)**: `.agents/communication/tasks/<task-id>.md` (`FROM: hub`, `TO: implementer`).
+- **Results (Outbound to Hub)**: `.agents/communication/results/<task-id>.md` (`FROM: implementer`, `TO: hub`).
+- **Consultation Requests**: `.agents/communication/consultations/<topic>_request.md` (`FROM: hub`, `TO: implementer`).
+- **Consultation Responses**: `.agents/communication/consultations/<topic>_response.md` (`FROM: implementer`, `TO: hub`).
 
 ### 5.2 Task Immutability & Spec Drift Prevention
 - **Frozen After Notification**: Once a task record (`tasks/<id>.md`) is committed and notified with `STATUS: TASK_READY`, its Acceptance Criteria and Scope are **frozen**.
-- **No In-Place Spec Mutations**: If requirements, technical design, or constraints evolve during implementation, do **NOT** silently edit the existing task file. Instead:
-  - Increment `ATTEMPT: 2` (or author a new task version with `SUPERSEDES: <previous-task-id>`).
-  - Document the rationale in the task revision.
-  - Implementer and Reviewer must align on the identical task revision to prevent **Spec Drift**.
+- **No In-Place Spec Mutations**: If requirements or technical design evolve during implementation, do NOT silently edit the existing task file. Instead, increment `ATTEMPT: 2` (or author a new task version with `SUPERSEDES: <previous-task-id>`).
 
 ### 5.3 Two-Lane Workflow
-To avoid bureaucratic overhead while maintaining absolute safety on critical paths:
-1. **Standard Lane (Core & Safety-Critical)**:
-   - *Applies to:* Core engine, CDP bindings, DOM agent, contracts, security/profile sandboxing, CLI backward compatibility.
-   - *Workflow:* Full 4-step cycle: `Task` $\rightarrow$ `Implementation` $\rightarrow$ `Result (with commit SHA)` $\rightarrow$ `Independent Review (fresh context)`.
-2. **Trivial Lane (Low-Risk / Cosmetic)**:
-   - *Applies to:* Documentation fixes, comments, typo corrections, minor test fixture text not altering contracts.
-   - *Workflow:* Lightweight cycle: `Task` $\rightarrow$ `Implementation + Result commit` $\rightarrow$ Quick reviewer verification without multi-round ceremony.
+1. **Standard Lane (Core & Safety-Critical)**: Full cycle: `Task (from Hub)` $\rightarrow$ `Implementation (via built-in subagents)` $\rightarrow$ `Result commit (to Hub)` $\rightarrow$ `Final Review by Hub`.
+2. **Trivial Lane (Cosmetic / Docs)**: Lightweight cycle: `Task` $\rightarrow$ `Direct fix + Result commit` $\rightarrow$ Hub sign-off.
 
-### 5.4 Mandatory Handoff Routing Matrix
-1. **Orchestrator** $\rightarrow$ `implementer`:
-   ```bash
-   scripts/notify_agent.sh -a implementer -m "Task <id> ready." -r .agents/communication/tasks/<id>.md
-   ```
-2. **Implementer** $\rightarrow$ `reviewer`:
-   ```bash
-   scripts/notify_agent.sh -a reviewer -m "Result for <id> ready for review." -r .agents/communication/results/<id>.md
-   ```
-3. **Reviewer**:
-   - If `STATUS: REVISION_REQUIRED` $\rightarrow$ `implementer`:
-     ```bash
-     scripts/notify_agent.sh -a implementer -m "Revision required for <id>." -r .agents/communication/reviews/<id>.md
-     ```
-   - If `STATUS: APPROVED` $\rightarrow$ `orchestrator` & `hub`:
-     ```bash
-     scripts/notify_agent.sh -a orchestrator -m "Task <id> approved." -r .agents/communication/reviews/<id>.md
-     scripts/notify_agent.sh -a hub -m "Task <id> approved." -r .agents/communication/reviews/<id>.md
-     ```
-
-### 5.5 Turn Completion Rule (No Infinite Waiting)
-- Once an agent finishes sending a notification via `notify_agent.sh`, it **MUST immediately end its turn** and become inactive.
-- Agents must **NEVER** poll or loop waiting for the other agent. The receiving agent will wake the sender upon completing its turn.
-
-### 5.6 Semantic Linter Enforcement
-Before every handoff, `scripts/notify_agent.sh` automatically invokes `scripts/lint_communication_records.py --handoff <record> --target <target>`:
-- **Git Commit Verifiability**: All `BASE_COMMIT`, `IMPLEMENTATION_TIP`, and `REVIEWED_COMMIT` hashes must exist in Git history (`git cat-file -e`).
+### 5.4 Semantic Linter Enforcement
+Before every commit and handoff of a result record, verify compliance via:
+```bash
+python3 scripts/lint_communication_records.py .agents/communication/results/<task-id>.md
+```
+- **Git Commit Verifiability**: All `BASE_COMMIT` and `IMPLEMENTATION_TIP` hashes must exist in Git history (`git cat-file -e`).
 - **Clean Worktree**: When handing off a Result, the repository worktree must be 100% clean (no untracked or modified files).
-- **Mandatory Sections**: Required sections (Objective, Scope, Acceptance Criteria, Validation, Evidence) are fatal errors if omitted.
-- **Literal Key Dispatch**: `notify_agent.sh` uses `tmux send-keys -l` to prevent shell/vim escape corruption.
+- **Mandatory Sections**: Required sections (Summary, Scope Modified, Validation Evidence) are fatal errors if omitted.
 
 ---
 

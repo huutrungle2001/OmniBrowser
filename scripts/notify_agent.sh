@@ -139,7 +139,8 @@ resolve_target() {
             done
             ;;
         reviewer|review|omni_reviewer|omni-reviewer|workbench_reviewer)
-            for cand in "omni_reviewer:0.0" "omni-reviewer:0.0" "omni_reviewer" "omni-reviewer" "workbench_reviewer:0.0" "workbench_reviewer"; do
+            # In OmniBrowser, reviewer is Workbench Hub. Map reviewer notifications to hub.
+            for cand in "omni-hub:0.0" "omni_hub:0.0" "omni-hub" "omni_hub" "workbench_hub:0.0" "workbench_hub"; do
                 if check_pane_alive "$cand"; then
                     echo "$cand"
                     return 0
@@ -162,9 +163,9 @@ resolve_target() {
 }
 
 if ! target_pane="$(resolve_target "$target_arg")"; then
-    echo "ERROR: unsupported target or session does not exist: $target_arg" >&2
-    echo "Allowed targets: hub, orchestrator, implementer, reviewer, or active tmux session (e.g. omni-hub, omni_reviewer)." >&2
-    exit 2
+    echo "[INFO] No active tmux pane found for target '$target_arg'."
+    echo "[INFO] Communication record is committed in Git and ready for Hub."
+    exit 0
 fi
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
