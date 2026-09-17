@@ -195,7 +195,7 @@ class RecipeStore:
         self._recipes = {}
         if not self.root.exists():
             return []
-        for path in sorted(self.root.glob("*.json")):
+        for path in sorted(self.root.rglob("*.json")):
             try:
                 recipe = Recipe.from_json(path.read_bytes())
             except (OSError, ValueError, json.JSONDecodeError) as error:
