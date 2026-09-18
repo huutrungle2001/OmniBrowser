@@ -10,6 +10,20 @@ OmniBrowser is an open-source, deterministic browser automation engine and proce
 
 ---
 
+## 0. Iron Invariants & Operational Rules (MANDATORY)
+
+1. **Absolute Prohibition on Ad-Hoc Scripts (Zero-Tolerance)**:
+   - **NEVER** run `python3 -c "from playwright..."` or write ad-hoc Playwright/Puppeteer/Selenium scripts in `scratch/`, `.tmp/`, or the shell.
+   - All browser operations MUST strictly follow the OmniBrowser standard pipeline:
+     ```text
+     list-tabs ⟶ observe (--match) ⟶ act (--action, --ref) ⟶ observe
+     ```
+2. **"Stop & Ask" Protocol for Unsupported Capabilities**:
+   - If `cdp_controller.py` does not currently support a specialized capability (e.g., complex canvas drag-and-drop, specialized image CAPTCHA, nested cross-origin OOPIF frames), the agent **MUST STOP IMMEDIATELY** and ask the user.
+   - Absolutely **NEVER** attempt to firefight or bypass limitations by generating unauthorized ad-hoc scripts.
+
+---
+
 ## 1. Environment & Setup
 
 * **Default CDP Port**: `17082` (fallback `9222`)

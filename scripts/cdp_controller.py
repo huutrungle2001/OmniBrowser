@@ -114,6 +114,19 @@ def cmd_screenshot(args):
         playwright.stop()
 
 
+def cmd_upload(args):
+    playwright, browser, _context, page = _legacy_page(args)
+    try:
+        selector = getattr(args, "selector", None) or "#upload-files"
+        print(f"Uploading {len(args.files)} file(s) via selector '{selector}'...")
+        page.set_input_files(selector, args.files)
+        print("Upload command executed successfully.")
+    finally:
+        browser.close()
+        playwright.stop()
+
+
+
 def _manager_page(args):
     from browser_core.page_manager import PageManager
 
@@ -619,6 +632,10 @@ def _parser():
     p = sub.add_parser("goto", help="Navigate tab to a specific URL"); p.add_argument("url")
     p = sub.add_parser("eval", help="Evaluate JavaScript expression on active page"); p.add_argument("expression")
     p = sub.add_parser("screenshot", help="Capture a screenshot"); p.add_argument("--output", default="screenshot.png")
+    p = sub.add_parser("upload", help="Upload files to input[type=file]")
+    p.add_argument("files", nargs="+", help="File paths to upload")
+    p.add_argument("--selector", default="#upload-files", help="Selector for file input (default: #upload-files)")
+
     p = sub.add_parser("observe", help="Return a compact semantic DOM projection")
     p.add_argument("--scope", default="main", choices=["main", "viewport"])
     p.add_argument("--max-elements", type=int, default=80)
