@@ -64,6 +64,13 @@ Define success criteria. Loop until verified.
    - LLM code reviews cannot substitute for real execution. Implementation handoff requires exit-code 0 from actual integration tests against running Chrome instances.
 5. **No Infinite Multi-Agent Debates**:
    - Maximum 3 revision cycles per task. If a task is not approved after 3 attempts, mark `STATUS: BLOCKED` and escalate to the human operator.
+6. **Absolute Prohibition on Ad-Hoc Browser Automation Scripts (Iron Invariant)**:
+   - Absolutely NEVER execute `python3 -c "from playwright..."` or create any ad-hoc/throwaway Playwright, Puppeteer, or Selenium scripts in `scratch/`, `.tmp/`, or the shell when interacting with browsers.
+   - Every web interaction MUST strictly flow through OmniBrowser's standard pipeline:
+     `list-tabs ⟶ observe (--match) ⟶ act (--action, --ref) ⟶ observe`
+7. **"Stop & Ask" Protocol for Web Capabilities**:
+   - If `cdp_controller.py` does not currently support a specialized capability (e.g., complex canvas drag-and-drop, specific image CAPTCHA bypass, or nested OOPIF frames), the agent MUST STOP immediately and consult the user.
+   - Absolutely NEVER attempt to "firefight" or bypass limitations by generating unauthorized ad-hoc scripts.
 
 ---
 
