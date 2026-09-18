@@ -174,7 +174,8 @@ def cmd_act(args):
         raise ValueError("act requires --op and --ref (or a JSON request)")
     manager, page = _manager_page(args)
     try:
-        _json(act(page, operation, ref, value, expect, manager=manager).to_dict())
+        _json(act(page, operation, ref, value, expect, manager=manager, learn_run=args.learn_run,
+                  memory_root=getattr(args, "memory_root", None)).to_dict())
     finally:
         manager.close()
 
@@ -234,6 +235,23 @@ def _recipe_store(args):
             return RecipeStore(recipes_dir=recipe_dir)
         except TypeError:
             return RecipeStore(recipe_dir)
+
+
+def _learning_memory(args):
+    from browser_core.recipes import LearningMemory
+
+    return LearningMemory(getattr(args, "memory_root", None))
+
+
+def cmd_learn_begin(args):
+    _json(_learning_memory(args).begin(args.goal, policy=args.policy, agent_id=args.agent_id))
+
+
+def cmd_learn_complete(args):
+    validation = _read_json(args.validation, None, {}) or {}
+    if not isinstance(validation, dict):
+        raise ValueError("learn complete --validation must be a JSON object")
+    _json(_learning_memory(args).complete(args.run_id, success=args.success, validation=validation))
 
 
 def _recipe_value(value: Any) -> Any:
@@ -360,6 +378,18 @@ def cmd_recipe_run(args):
         _json(_recipe_value(result))
     finally:
         manager.close()
+
+
+def cmd_recipe_candidates(args):
+    _json(_learning_memory(args).candidates(args.url))
+
+
+def cmd_recipe_promote(args):
+    _json(_learning_memory(args).promote(args.candidate_id, approve=args.approve))
+
+
+def cmd_recipe_suggest(args):
+    _json(_learning_memory(args).suggest(args.url))
 
 
 class _RawCDP:
@@ -597,12 +627,22 @@ def _parser():
     p = sub.add_parser("act", help="Execute an action against an opaque DOM ref")
     p.add_argument("--op", "--action", dest="op"); p.add_argument("--ref"); p.add_argument("--value")
     p.add_argument("--expect"); p.add_argument("--json", nargs="?", const=True, default=None); p.add_argument("--file")
+    p.add_argument("--learn-run", help="Append this successful action to a learning run")
+    p.add_argument("--memory-root", default=None, help="Local learned-memory root (defaults to ~/.omnibrowser/memory/v1)")
     p = sub.add_parser("inspect", help="Inspect targeted DOM, accessibility, or frame tree")
     p.add_argument("mode", choices=["dom", "ax", "frame-tree"]); p.add_argument("--ref"); p.add_argument("--depth", type=int, default=3); p.add_argument("--format", choices=["text", "json"], default="text")
     p = sub.add_parser("run-code", aliases=["runBrowserCode"], help="Run bounded JavaScript in the page")
     p.add_argument("--script"); p.add_argument("--script-file"); p.add_argument("--mode", choices=["read", "write"], default="read"); p.add_argument("--timeout-ms", type=int)
     p = sub.add_parser("visual", aliases=["inspectVisual"], help="Capture a targeted visual crop")
     p.add_argument("--ref", "--scope-ref", dest="ref"); p.add_argument("--output"); p.add_argument("--padding", type=int, default=20)
+    p = sub.add_parser("learn", help="Record and distill a privacy-safe semantic learning run")
+    learn_sub = p.add_subparsers(dest="learn_command", required=True)
+    p_begin = learn_sub.add_parser("begin", help="Start an isolated learning run")
+    p_begin.add_argument("--goal", required=True); p_begin.add_argument("--policy", default="suggest", choices=["suggest", "manual"])
+    p_begin.add_argument("--agent-id", default=None); p_begin.add_argument("--memory-root", default=None)
+    p_complete = learn_sub.add_parser("complete", help="Finalize a learning run and create a draft")
+    p_complete.add_argument("run_id"); p_complete.add_argument("--success", action="store_true", required=True)
+    p_complete.add_argument("--validation", default="{}"); p_complete.add_argument("--memory-root", default=None)
     p = sub.add_parser("recipe", help="Use a stored procedural browser recipe")
     recipe_sub = p.add_subparsers(dest="recipe_command", required=True)
     p_list = recipe_sub.add_parser("list", help="List available recipes")
@@ -615,6 +655,13 @@ def _parser():
     p_run.add_argument("recipe_id")
     p_run.add_argument("--params", nargs="?", const="{}", default="{}", help="JSON object of recipe parameters")
     p_run.add_argument("--recipes-dir", default=None, help="Recipe directory (defaults to ./recipes)")
+    p_candidates = recipe_sub.add_parser("candidates", help="List locally learned draft recipes")
+    p_candidates.add_argument("--url", default=None); p_candidates.add_argument("--memory-root", default=None)
+    p_promote = recipe_sub.add_parser("promote", help="Promote a local learned draft after approval")
+    p_promote.add_argument("candidate_id"); p_promote.add_argument("--approve", action="store_true", default=False)
+    p_promote.add_argument("--memory-root", default=None)
+    p_suggest = recipe_sub.add_parser("suggest", help="Suggest learned recipes for a URL")
+    p_suggest.add_argument("--url", default=None); p_suggest.add_argument("--memory-root", default=None)
     return parser
 
 
@@ -622,6 +669,8 @@ def main(argv=None):
     args = _parser().parse_args(argv)
     try:
         command = {"runBrowserCode": "run-code", "inspectVisual": "visual"}.get(args.command, args.command)
+        if command == "learn":
+            return globals()[f"cmd_learn_{args.learn_command}"](args)
         if command == "recipe":
             return globals()[f"cmd_recipe_{args.recipe_command}"](args)
         return globals()[f"cmd_{command.replace('-', '_')}"](args)

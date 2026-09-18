@@ -119,6 +119,8 @@ def act(
     expect: dict[str, Any] | None = None,
     *,
     manager: PageManager | None = None,
+    learn_run: str | None = None,
+    memory_root: str | None = None,
 ) -> ActResult:
     """Execute one native action and optionally wait for its postcondition."""
     started = time.monotonic()
@@ -141,6 +143,18 @@ def act(
         raise StaleRefError(f"Stale ref {dom_ref}: node is detached; call observe() to refresh refs")
 
     timeout_ms = min(max(int((expect or {}).get("timeout_ms", 5000)), 1), 10000)
+    # A durable anchor must be derived while the opaque ref is still valid.
+    anchor: dict[str, Any] | None = None
+    if learn_run:
+        try:
+            from .recipes import AnchorCompiler
+            anchor = AnchorCompiler.compile_handle(handle)
+        except Exception:
+            # Journal failure must never change the result of a user action.
+            anchor = {"candidates": [], "context": {"opaque_ref": str(dom_ref)}}
+    # This snapshot is intentionally immediately before dispatch.  Capturing it
+    # from inside the polling loop misses fast navigations.
+    initial_url = page.url
     try:
         if action == "click":
             handle.click(timeout=timeout_ms)
@@ -165,23 +179,38 @@ def act(
 
     expect = expect or {}
     if expect:
-        deadline = time.monotonic() + timeout_ms / 1000
-        while True:
+        from .recipes import PostconditionWatcher
+
+        def expectation() -> bool:
             current = _snapshot(page_manager, page, frame)
-            if _expectation_met(expect, before=before, current=current, page=page, manager=page_manager, frame=frame, initial_url=page.url):
-                break
-            if time.monotonic() >= deadline:
-                raise ActionTimeoutError(f"Expectation timed out after {timeout_ms}ms for action {action}")
-            page.wait_for_timeout(50)
+            return _expectation_met(expect, before=before, current=current, page=page, manager=page_manager,
+                                    frame=frame, initial_url=initial_url)
+
+        try:
+            PostconditionWatcher.poll(expectation, timeout_ms, lambda: page.wait_for_timeout(50))
+        except ValueError as error:
+            raise ActionTimeoutError(f"Expectation timed out after {timeout_ms}ms for action {action}") from error
     after = _snapshot(page_manager, page, frame)
     elapsed = round((time.monotonic() - started) * 1000)
-    return ActResult(
+    result = ActResult(
         revision=after.revision,
         delta=_delta(before, after),
         ok=True,
         document_epoch=after.document_epoch,
         action_duration_ms=elapsed,
     )
+    if learn_run and anchor is not None:
+        try:
+            from .recipes import LearningMemory
+            LearningMemory(memory_root).append_action(
+                learn_run, action=action, anchor=anchor, value=value,
+                expect=expect, url=initial_url, duration_ms=elapsed,
+            )
+        except Exception:
+            # Learning is advisory.  A transient local DB issue must not make
+            # the browser action fail after it has already succeeded.
+            pass
+    return result
 
 
 class ActionEngine:
@@ -190,5 +219,5 @@ class ActionEngine:
     def __init__(self, manager: PageManager):
         self.manager = manager
 
-    def act(self, page: Page, action: str, ref: DOMNodeRef | str, value: str | None = None, expect: dict[str, Any] | None = None) -> ActResult:
-        return act(page, action, ref, value, expect, manager=self.manager)
+    def act(self, page: Page, action: str, ref: DOMNodeRef | str, value: str | None = None, expect: dict[str, Any] | None = None, *, learn_run: str | None = None, memory_root: str | None = None) -> ActResult:
+        return act(page, action, ref, value, expect, manager=self.manager, learn_run=learn_run, memory_root=memory_root)
