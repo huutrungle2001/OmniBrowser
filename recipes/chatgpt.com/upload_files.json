@@ -1,0 +1,24 @@
+{
+  "id": "chatgpt_upload_files",
+  "name": "Upload files to ChatGPT composer",
+  "description": "Attach one or more local files to the ChatGPT file input element.",
+  "domain_pattern": ["https://chatgpt.com/*"],
+  "steps": [
+    {
+      "action": "upload",
+      "target": {
+        "selector": "#upload-files, input[type='file']",
+        "ordinal": "first"
+      },
+      "value": "{{files}}"
+    }
+  ],
+  "validation": {},
+  "metadata": {
+    "version": "1.0",
+    "success_count": 0,
+    "failure_count": 0,
+    "last_failure_reason": null,
+    "failure_ledger": []
+  }
+}
