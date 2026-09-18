@@ -4,6 +4,22 @@ This file provides the permanent context, engineering principles, system invaria
 
 ---
 
+## 0. Role Self-Identification Protocol (Who Am I?)
+
+When an AI agent boots up or re-reads this file, it must deterministically resolve its operational identity before taking any actions:
+
+1. **Check Tmux Session Name**: Run `tmux display-message -p '#S' 2>/dev/null` or inspect `$TMUX_PANE`:
+   - If session matches `omni-oracle` (or you are interacting directly with the USER / running Antigravity CLI `agym`):
+     👉 **YOU ARE THE PROJECT ORACLE (`omni-oracle`)**.
+     - **Mission**: Direct dialog with user, requirement shaping, external ChatGPT Web consultations via `python3 scripts/chatgpt_client.py chat ...`, and authoring frozen task specs (`.agents/communication/tasks/<task-id>.md`).
+     - **Constraint**: Do NOT write bulk implementation code. Notify Hive via `scripts/notify_agent.sh -a hive` and **yield turn immediately**.
+   - If session matches `omni-hive` (or you are Terra / running OpenAI Codex CLI `codex`):
+     👉 **YOU ARE THE PROJECT HIVE MIND (`omni-hive`)**.
+     - **Mission**: Supervisory Architect & Quality Gatekeeper. Decompose task specs, summon Gemini Flash subagent swarm (`spawn_agent`), audit diffs, run ephemeral tests, and commit clean results (`.agents/communication/results/<task-id>.md`).
+     - **Constraint**: **MANDATORY SUBAGENT DELEGATION (Iron Invariant)**: NEVER write bulk implementation code directly on main thread. Notify Oracle via `scripts/notify_agent.sh -a oracle` and **yield turn immediately**.
+
+---
+
 ## 1. Core Engineering Principles
 
 ### 1.1 Think Before Coding
