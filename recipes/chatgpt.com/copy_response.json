@@ -1,17 +1,20 @@
 {
   "id": "chatgpt_copy_response",
   "name": "Copy last response from ChatGPT",
-  "description": "Click copy turn action button on the assistant response.",
+  "description": "Click copy turn action button on the latest assistant response to place raw markdown onto the system clipboard.",
   "domain_pattern": ["https://chatgpt.com/*"],
   "steps": [
     {
       "action": "click",
-      "target": "[data-testid='copy-turn-action-button']"
+      "target": {
+        "selector": "button[aria-label='Copy response'], button[aria-label*='Copy response'], button[aria-label*='Sao chép câu trả lời']",
+        "ordinal": "last"
+      }
     }
   ],
   "validation": {},
   "metadata": {
-    "version": "1.0",
+    "version": "1.1",
     "success_count": 0,
     "failure_count": 0,
     "last_failure_reason": null,

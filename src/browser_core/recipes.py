@@ -178,14 +178,14 @@ class Recipe:
             raise ValueError("Recipe id must contain only letters, numbers, _, ., or -")
         if not self.steps:
             raise ValueError("Recipe must contain at least one step")
-        valid_actions = {"click", "fill", "select", "wait_for", "eval"}
+        valid_actions = {"click", "fill", "select", "wait_for", "eval", "upload"}
         automatic = bool(self.metadata.get("automatic") or self.metadata.get("source") == "learned")
         for index, step in enumerate(self.steps):
             if step.action not in valid_actions:
                 raise ValueError(f"Unsupported recipe action at step {index}: {step.action!r}")
             if step.action != "eval" and not step.target:
                 raise ValueError(f"Recipe step {index} requires target")
-            if step.action in {"fill", "select", "eval"} and step.value is None:
+            if step.action in {"fill", "select", "eval", "upload"} and step.value is None:
                 raise ValueError(f"Recipe step {index} requires value")
             if automatic and step.action == "eval":
                 raise ValueError("Automatic recipes may not contain eval steps")
@@ -371,9 +371,18 @@ class AnchorCompiler:
 
     @classmethod
     def resolve(cls, page: Page, target: Any, *, mutating: bool) -> Any:
-        candidates = target.get("candidates", []) if isinstance(target, Mapping) else [{"kind": "scoped_css", "selector": str(target)}]
+        ordinal = None
+        if isinstance(target, Mapping):
+            ordinal = target.get("ordinal")
+            if "selector" in target and not target.get("candidates"):
+                candidates = [{"kind": "scoped_css", "selector": str(target["selector"])}]
+            else:
+                candidates = target.get("candidates", [])
+        else:
+            candidates = [{"kind": "scoped_css", "selector": str(target)}]
         ambiguous = False
         for candidate in candidates:
+            cand_ordinal = candidate.get("ordinal", ordinal)
             kind = candidate.get("kind")
             if kind in {"test_attr", "scoped_css"}:
                 selector = str(candidate.get("selector", ""))
@@ -389,6 +398,13 @@ class AnchorCompiler:
             count = locator.count()
             if count == 1:
                 return locator
+            if count > 1 and cand_ordinal is not None:
+                if cand_ordinal in ("last", -1):
+                    return locator.last
+                if cand_ordinal in ("first", 0):
+                    return locator.first
+                if isinstance(cand_ordinal, int):
+                    return locator.nth(cand_ordinal)
             ambiguous = ambiguous or count > 1
         if ambiguous and mutating:
             raise AnchorAmbiguous("Recipe anchor matched multiple elements; explicit ordinal intent is required")
@@ -647,13 +663,22 @@ class RecipeEngine:
                 act(page, native, ref, None if value is None else str(value), {**expect, "timeout_ms": timeout}, manager=manager)
                 return
         initial_url = page.url
-        locator = AnchorCompiler.resolve(page, target, mutating=action in {"click", "fill", "select"})
+        locator = AnchorCompiler.resolve(page, target, mutating=action in {"click", "fill", "select", "upload"})
         if action == "click":
-            locator.click(timeout=timeout)
+            try:
+                locator.click(timeout=timeout)
+            except Exception:
+                locator.click(force=True, timeout=timeout)
         elif action == "fill":
-            locator.fill(str(value), timeout=timeout)
+            try:
+                locator.fill(str(value), timeout=timeout)
+            except Exception:
+                locator.evaluate('(el, text) => { el.focus(); document.execCommand("insertText", false, text); }', str(value))
         elif action == "select":
             locator.select_option(str(value), timeout=timeout)
+        elif action == "upload":
+            files = value if isinstance(value, list) else [str(value)]
+            locator.set_input_files(files, timeout=timeout)
         elif action == "wait_for":
             state = str(value or expect.get("state", "visible"))
             locator.wait_for(state=state, timeout=timeout)

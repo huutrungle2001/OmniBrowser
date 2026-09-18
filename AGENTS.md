@@ -121,15 +121,24 @@ To prevent hallucination, role ambiguity, or ad-hoc prompting, the Lead Agent se
 
 ---
 
-## 5. Interface with Workbench (Meta-Hub Communication)
+## 5. Two-Session Operational Architecture & Hub Interface
 
-Communication between OmniBrowser and Workbench is strictly **asynchronous, file-based, and committed to Git**:
+OmniBrowser operates under the standardized **Two-Session Model** managed via Tmux:
+
+1. **`omni-orch` (Project Orchestrator — Agym)**:
+   - Direct conversational and brainstorming partner for the USER.
+   - Consults external ChatGPT Web oracle via `chatgpt_client.py` for advanced algorithmic questions without local token bloat.
+   - Authors frozen formal task specifications (`.agents/communication/tasks/<task-id>.md`) and handoffs via `scripts/notify_agent.sh -a implementer`.
+2. **`omni-impl` (Lead Implementer — Terra & Gemini Swarm)**:
+   - Runs `cx/gpt-5.6-terra` as Supervisory Architect & Quality Gatekeeper.
+   - Decomposes tasks into subtasks and summons Gemini Flash worker squad (`spawn_agent`) to write code and tests.
+   - Audits diffs, runs regression tests in ephemeral sandboxes, commits results (`.agents/communication/results/<task-id>.md`), and handoffs via `scripts/notify_agent.sh -a orchestrator`.
 
 ### 5.1 Communication Schema
-- **Tasks (Inbound from Hub)**: `.agents/communication/tasks/<task-id>.md` (`FROM: hub`, `TO: implementer`).
-- **Results (Outbound to Hub)**: `.agents/communication/results/<task-id>.md` (`FROM: implementer`, `TO: hub`).
-- **Consultation Requests**: `.agents/communication/consultations/<topic>_request.md` (`FROM: hub`, `TO: implementer`).
-- **Consultation Responses**: `.agents/communication/consultations/<topic>_response.md` (`FROM: implementer`, `TO: hub`).
+- **Tasks (From Orchestrator)**: `.agents/communication/tasks/<task-id>.md` (`FROM: orchestrator` or `hub`, `TO: implementer`).
+- **Results (From Implementer)**: `.agents/communication/results/<task-id>.md` (`FROM: implementer`, `TO: orchestrator` or `hub`).
+- **Consultation Requests**: `.agents/communication/consultations/<topic>_request.md`.
+- **Consultation Responses**: `.agents/communication/consultations/<topic>_response.md`.
 
 ### 5.2 Task Immutability & Spec Drift Prevention
 - **Frozen After Notification**: Once a task record (`tasks/<id>.md`) is committed and notified with `STATUS: TASK_READY`, its Acceptance Criteria and Scope are **frozen**.

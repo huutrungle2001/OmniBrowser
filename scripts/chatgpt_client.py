@@ -129,7 +129,7 @@ def attach_files(page, file_paths: list) -> bool:
         return False
 
     print(f"📎 Attaching {len(resolved_paths)} file(s) to ChatGPT: {[Path(p).name for p in resolved_paths]}...", flush=True)
-    file_input = page.locator("input[type='file']").first
+    file_input = page.locator("#upload-files, input[type='file']").first
     if file_input.count() == 0:
         print("❌ Could not locate file input element in ChatGPT DOM.", file=sys.stderr)
         return False
@@ -218,11 +218,18 @@ def extract_answer_data(page) -> dict:
     """Extract Markdown text, code blocks, and canvas artifacts from the latest assistant turn."""
     markdown_text = ""
     try:
-        copy_btn = page.locator("[data-testid='copy-turn-action-button']").last
+        copy_btn = page.locator("button[aria-label='Copy response'], button[aria-label*='Copy response'], button[aria-label*='Sao chép câu trả lời'], [data-message-author-role='assistant'] button[data-testid='copy-turn-action-button']").last
         if copy_btn.count() > 0:
+            copy_btn.scroll_into_view_if_needed()
             copy_btn.click(timeout=2000, force=True)
-            time.sleep(0.3)
+            time.sleep(0.5)
             markdown_text = page.evaluate("() => navigator.clipboard.readText()")
+            if not markdown_text or not markdown_text.strip():
+                import subprocess
+                if sys.platform == "darwin":
+                    markdown_text = subprocess.check_output(["pbpaste"]).decode("utf-8")
+                elif sys.platform.startswith("linux"):
+                    markdown_text = subprocess.check_output(["xclip", "-selection", "clipboard", "-o"]).decode("utf-8")
     except Exception:
         pass
 
@@ -328,7 +335,15 @@ def execute_chat(
                     composer.fill(prompt_text)
                     time.sleep(0.5)
                 except Exception as e:
-                    print(f"⚠️ Direct fill warning: {e}", flush=True)
+                    print(f"⚠️ Direct fill fallback via insertText: {e}", flush=True)
+                    page.evaluate("""(text) => {
+                        const el = document.querySelector("#prompt-textarea, div.ProseMirror");
+                        if (el) {
+                            el.focus();
+                            document.execCommand("insertText", false, text);
+                        }
+                    }""", prompt_text)
+                    time.sleep(0.5)
 
         # Record initial assistant turns
         initial_turns = page.evaluate("""() => {
