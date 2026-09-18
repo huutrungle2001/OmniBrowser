@@ -44,3 +44,6 @@ blob-report/
 .idea/
 *.swp
 *.swo
+
+# Runtime results & logs
+results/
