@@ -125,18 +125,18 @@ To prevent hallucination, role ambiguity, or ad-hoc prompting, the Lead Agent se
 
 OmniBrowser operates under the standardized **Two-Session Model** managed via Tmux:
 
-1. **`omni-orch` (Project Orchestrator — Agym)**:
+1. **`omni-oracle` (Project Oracle — Agym)**:
    - Direct conversational and brainstorming partner for the USER.
    - Consults external ChatGPT Web oracle via `chatgpt_client.py` for advanced algorithmic questions without local token bloat.
-   - Authors frozen formal task specifications (`.agents/communication/tasks/<task-id>.md`) and handoffs via `scripts/notify_agent.sh -a implementer`.
-2. **`omni-impl` (Lead Implementer — Terra & Gemini Swarm)**:
-   - Runs `cx/gpt-5.6-terra` as Supervisory Architect & Quality Gatekeeper.
-   - Decomposes tasks into subtasks and summons Gemini Flash worker squad (`spawn_agent`) to write code and tests.
-   - Audits diffs, runs regression tests in ephemeral sandboxes, commits results (`.agents/communication/results/<task-id>.md`), and handoffs via `scripts/notify_agent.sh -a orchestrator`.
+   - Authors frozen formal task specifications (`.agents/communication/tasks/<task-id>.md`) and handoffs via `scripts/notify_agent.sh -a hive`.
+2. **`omni-hive` (Lead Hive Mind — Terra & Gemini Swarm)**:
+   - Runs `cx/gpt-5.6-terra` as Supervisory Hive Mind & Quality Gatekeeper.
+   - Decomposes tasks into subtasks and summons Gemini Flash swarm squad (`spawn_agent`) to write code and tests.
+   - Audits diffs, runs regression tests in ephemeral sandboxes, commits results (`.agents/communication/results/<task-id>.md`), and handoffs via `scripts/notify_agent.sh -a oracle`.
 
 ### 5.1 Communication Schema
-- **Tasks (From Orchestrator)**: `.agents/communication/tasks/<task-id>.md` (`FROM: orchestrator` or `hub`, `TO: implementer`).
-- **Results (From Implementer)**: `.agents/communication/results/<task-id>.md` (`FROM: implementer`, `TO: orchestrator` or `hub`).
+- **Tasks (From Oracle)**: `.agents/communication/tasks/<task-id>.md` (`FROM: oracle` or `hub`, `TO: hive`).
+- **Results (From Hive)**: `.agents/communication/results/<task-id>.md` (`FROM: hive`, `TO: oracle` or `hub`).
 - **Consultation Requests**: `.agents/communication/consultations/<topic>_request.md`.
 - **Consultation Responses**: `.agents/communication/consultations/<topic>_response.md`.
 

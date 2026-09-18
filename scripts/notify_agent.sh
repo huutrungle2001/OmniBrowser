@@ -122,16 +122,16 @@ resolve_target() {
                 fi
             done
             ;;
-        orchestrator|omni_orchestrator|omni-orchestrator|omni-orch|workbench_orchestrator)
-            for cand in "omni-orch:0.0" "omni-orch" "omni_orchestrator:0.0" "omni-orchestrator:0.0" "omni_orchestrator" "workbench_orchestrator:0.0" "workbench_orchestrator"; do
+        oracle|orchestrator|omni_oracle|omni-oracle|omni_orchestrator|omni-orchestrator|omni-orch|workbench_orchestrator)
+            for cand in "omni-oracle:0.0" "omni-oracle" "omni-orch:0.0" "omni-orch" "omni_orchestrator:0.0" "omni-orchestrator:0.0" "omni_orchestrator" "workbench_orchestrator:0.0" "workbench_orchestrator"; do
                 if check_pane_alive "$cand"; then
                     echo "$cand"
                     return 0
                 fi
             done
             ;;
-        implementer|coder|dev|omni_implementer|omni-implementer|omni-impl|workbench-codex)
-            for cand in "omni-impl:0.0" "omni-impl" "omni-hub:0.0" "omni-hub" "omni_implementer:0.0" "omni-implementer:0.0" "omni_implementer" "workbench-codex:0.0" "workbench-codex"; do
+        hive|implementer|coder|dev|omni_hive|omni-hive|omni_implementer|omni-implementer|omni-impl|workbench-codex)
+            for cand in "omni-hive:0.0" "omni-hive" "omni-impl:0.0" "omni-impl" "omni-hub:0.0" "omni-hub" "omni_implementer:0.0" "omni-implementer:0.0" "omni_implementer" "workbench-codex:0.0" "workbench-codex"; do
                 if check_pane_alive "$cand"; then
                     echo "$cand"
                     return 0
@@ -139,8 +139,7 @@ resolve_target() {
             done
             ;;
         reviewer|review|omni_reviewer|omni-reviewer|workbench_reviewer)
-            # In OmniBrowser, reviewer is orchestrator/hub.
-            for cand in "omni-orch:0.0" "omni-orch" "omni-hub:0.0" "omni_hub:0.0" "omni-hub" "omni_hub" "workbench_hub:0.0" "workbench_hub"; do
+            for cand in "omni-oracle:0.0" "omni-oracle" "omni-orch:0.0" "omni-orch" "omni_reviewer:0.0" "omni-reviewer:0.0" "omni_reviewer" "omni-reviewer" "workbench_reviewer:0.0" "workbench_reviewer"; do
                 if check_pane_alive "$cand"; then
                     echo "$cand"
                     return 0
@@ -149,8 +148,8 @@ resolve_target() {
             ;;
     esac
 
-    # 3. Check standard prefixes
-    for prefix in "omni_" "omni-" "workbench_" "workbench-"; do
+    # 3. Check standard prefixes across all ongoing projects
+    for prefix in "omni-" "omni_" "parking-" "parking_" "onteractive-" "onteractive_" "trunglh-" "trunglh_" "workbench-" "workbench_"; do
         for cand in "${prefix}${target}:0.0" "${prefix}${target}"; do
             if check_pane_alive "$cand"; then
                 echo "$cand"
@@ -163,9 +162,9 @@ resolve_target() {
 }
 
 if ! target_pane="$(resolve_target "$target_arg")"; then
-    echo "[INFO] No active tmux pane found for target '$target_arg'."
-    echo "[INFO] Communication record is committed in Git and ready for Hub."
-    exit 0
+    echo "ERROR: unsupported target or session does not exist: $target_arg" >&2
+    echo "Allowed targets: hub, orchestrator, implementer, reviewer, or active tmux session (e.g. omni-hub, omni_reviewer)." >&2
+    exit 2
 fi
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
