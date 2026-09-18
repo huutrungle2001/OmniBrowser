@@ -122,16 +122,16 @@ resolve_target() {
                 fi
             done
             ;;
-        orchestrator|omni_orchestrator|omni-orchestrator|workbench_orchestrator)
-            for cand in "omni_orchestrator:0.0" "omni-orchestrator:0.0" "omni_orchestrator" "workbench_orchestrator:0.0" "workbench_orchestrator"; do
+        orchestrator|omni_orchestrator|omni-orchestrator|omni-orch|workbench_orchestrator)
+            for cand in "omni-orch:0.0" "omni-orch" "omni_orchestrator:0.0" "omni-orchestrator:0.0" "omni_orchestrator" "workbench_orchestrator:0.0" "workbench_orchestrator"; do
                 if check_pane_alive "$cand"; then
                     echo "$cand"
                     return 0
                 fi
             done
             ;;
-        implementer|coder|dev|omni_implementer|omni-implementer|workbench-codex)
-            for cand in "omni-hub:0.0" "omni-hub" "omni_implementer:0.0" "omni-implementer:0.0" "omni_implementer" "workbench-codex:0.0" "workbench-codex"; do
+        implementer|coder|dev|omni_implementer|omni-implementer|omni-impl|workbench-codex)
+            for cand in "omni-impl:0.0" "omni-impl" "omni-hub:0.0" "omni-hub" "omni_implementer:0.0" "omni-implementer:0.0" "omni_implementer" "workbench-codex:0.0" "workbench-codex"; do
                 if check_pane_alive "$cand"; then
                     echo "$cand"
                     return 0
@@ -139,8 +139,8 @@ resolve_target() {
             done
             ;;
         reviewer|review|omni_reviewer|omni-reviewer|workbench_reviewer)
-            # In OmniBrowser, reviewer is Workbench Hub. Map reviewer notifications to hub.
-            for cand in "omni-hub:0.0" "omni_hub:0.0" "omni-hub" "omni_hub" "workbench_hub:0.0" "workbench_hub"; do
+            # In OmniBrowser, reviewer is orchestrator/hub.
+            for cand in "omni-orch:0.0" "omni-orch" "omni-hub:0.0" "omni_hub:0.0" "omni-hub" "omni_hub" "workbench_hub:0.0" "workbench_hub"; do
                 if check_pane_alive "$cand"; then
                     echo "$cand"
                     return 0
