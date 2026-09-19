@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Thin project-scoped wrapper for chatgpt-oracle skill
+# Automatically binds project root and session file, then delegates to central Workbench skill runner.
+
+set -euo pipefail
+
+# 1. Resolve project root (works from any subfolder)
+PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
+# 2. Bind local session registry strictly to this project
+export CHATGPT_SESSIONS_FILE="${PROJECT_ROOT}/.agents/communication/chatgpt_sessions.json"
+
+# 3. Resolve Workbench location
+WORKBENCH_ROOT="${WORKBENCH_PATH:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+if [[ ! -f "${WORKBENCH_ROOT}/.agents/skills/chatgpt-oracle/scripts/run.sh" ]]; then
+    WORKBENCH_ROOT="${HOME}/Documents/OnGoing/Workbench"
+fi
+
+SKILL_RUNNER="${WORKBENCH_ROOT}/.agents/skills/chatgpt-oracle/scripts/run.sh"
+
+if [[ ! -x "${SKILL_RUNNER}" ]]; then
+    exec python3 "${WORKBENCH_ROOT}/.agents/skills/chatgpt-oracle/scripts/chatgpt_client.py" "$@"
+else
+    exec "${SKILL_RUNNER}" "$@"
+fi
