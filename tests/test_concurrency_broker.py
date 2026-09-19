@@ -925,3 +925,103 @@ def test_dead_daemon_invalidates_class_s_leases(temp_broker_dir):
         assert router.lease_manager.is_identity_locked("shared-user") is False
     finally:
         router.close()
+
+
+def test_close_does_not_revoke_foreign_leases(temp_broker_dir):
+    """Verifies Gate 2: close() on Router 2 does NOT revoke leases owned by Router 1."""
+    broker_dir = Path(temp_broker_dir) / "broker"
+    vault_dir = Path(temp_broker_dir) / "vault"
+
+    r1 = SessionRouter(vault_dir=vault_dir, state_dir=broker_dir)
+    r2 = SessionRouter(vault_dir=vault_dir, state_dir=broker_dir)
+    try:
+        # R1 creates Lease 1
+        l1 = r1.request_lease(
+            BrowserRequirements(execution_class=ExecutionClass.CLASS_S),
+            agent_id="agent-1",
+            project_id="proj-1",
+        )
+        assert l1.is_active is True
+
+        # R2 calls close() - MUST NOT revoke L1!
+        r2.close()
+
+        # Check that L1 is still active in R1 and on disk
+        status = r1.status()
+        assert status["active_leases_count"] == 1
+        assert status["active_leases"][0]["lease_id"] == l1.lease_id
+
+        # Verify lease manager on R1 still has L1 active
+        val_lease = r1.lease_manager.validate_lease(l1.lease_id)
+        assert val_lease.is_active is True
+    finally:
+        r1.close()
+
+
+def test_dead_daemon_cross_process_invalidation(temp_broker_dir):
+    """Verifies Gate 4: dead Class S daemon invalidates leases cross-process on status()."""
+    import signal
+
+    broker_dir = Path(temp_broker_dir) / "broker"
+    vault_dir = Path(temp_broker_dir) / "vault"
+
+    r1 = SessionRouter(vault_dir=vault_dir, state_dir=broker_dir)
+    try:
+        l1 = r1.request_lease(
+            BrowserRequirements(execution_class=ExecutionClass.CLASS_S, auth_identity="cross-daemon-user"),
+            agent_id="agent-1",
+            project_id="proj-1",
+        )
+        assert l1.is_active is True
+        assert l1.process_pid is not None
+
+        # Kill daemon process
+        os.kill(l1.process_pid, signal.SIGKILL)
+        time.sleep(0.1)
+
+        # Independent Router 2 connects and checks status
+        r2 = SessionRouter(vault_dir=vault_dir, state_dir=broker_dir)
+        status_r2 = r2.status()
+
+        # Must report 0 active leases (no ghost lease!)
+        assert status_r2["active_leases_count"] == 0
+        assert r2.lease_manager.is_identity_locked("cross-daemon-user") is False
+        r2.close()
+    finally:
+        r1.close()
+
+
+def test_save_state_failure_full_resource_rollback(temp_broker_dir, monkeypatch):
+    """Verifies Gate 7: save-state failure performs full in-memory and CDP resource rollback."""
+    router = SessionRouter(
+        vault_dir=Path(temp_broker_dir) / "vault",
+        state_dir=Path(temp_broker_dir) / "broker",
+    )
+    try:
+        orig_open = os.open
+
+        def fail_open(path, flags, *args, **kwargs):
+            if ".tmp_state_" in str(path):
+                raise OSError("Disk write error")
+            return orig_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", fail_open)
+
+        with pytest.raises(BrokerStateUnavailableError):
+            router.request_lease(
+                BrowserRequirements(execution_class=ExecutionClass.CLASS_S, auth_identity="trans-rollback-user"),
+                agent_id="agent-1",
+                project_id="proj-1",
+            )
+
+        # Verify identity unlocked
+        assert router.lease_manager.is_identity_locked("trans-rollback-user") is False
+
+        # Verify in-memory leases cleaned up
+        assert router.lease_manager.get_active_lease_count() == 0
+
+        # Verify target registry baseline
+        assert len(router.target_registry.get_all_records()) == 0
+    finally:
+        monkeypatch.undo()
+        router.close()
