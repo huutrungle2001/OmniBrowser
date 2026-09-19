@@ -44,13 +44,26 @@ def get_sessions_file() -> Path:
     if "CHATGPT_SESSIONS_FILE" in os.environ:
         return Path(os.environ["CHATGPT_SESSIONS_FILE"]).resolve()
     cwd = Path.cwd()
-    candidate = cwd / ".agents" / "communication" / "chatgpt_sessions.json"
-    if candidate.exists():
-        return candidate
+
+    # 1. Standard agent communication directory
+    agent_sessions = cwd / ".agents" / "communication" / "chatgpt_sessions.json"
+    if agent_sessions.exists():
+        return agent_sessions
+
+    # 2. Legacy / alternative thread registry
     docs_threads = cwd / "docs" / "threads.json"
     if docs_threads.exists():
         return docs_threads
-    return candidate
+
+    # 3. Local root session file
+    root_sessions = cwd / ".chatgpt_sessions.json"
+    if root_sessions.exists():
+        return root_sessions
+
+    # Default to .agents/communication if .agents exists, otherwise root .chatgpt_sessions.json
+    if (cwd / ".agents").exists():
+        return agent_sessions
+    return root_sessions
 
 def load_sessions() -> dict:
     sf = get_sessions_file()
