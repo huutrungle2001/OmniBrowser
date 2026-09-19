@@ -50,16 +50,20 @@ def _is_loopback_host(hostname: str | None) -> bool:
 def _legacy_context_and_page(browser, url_substring=None):
     context = browser.contexts[0] if browser.contexts else browser.new_context()
     if url_substring:
-        # First priority: exact URL or exact title
+        # First priority: substring or exact match in page.url (fast and non-blocking)
         for page in context.pages:
-            if page.url == url_substring or page.title() == url_substring:
+            if url_substring in page.url:
                 page.bring_to_front()
                 return context, page
-        # Second priority: substring in URL or title
+        # Second priority: match in page title with timeout guard
         for page in context.pages:
-            if url_substring in page.url or (page.title() and url_substring.lower() in page.title().lower()):
-                page.bring_to_front()
-                return context, page
+            try:
+                t = page.evaluate("() => document.title")
+                if t and url_substring.lower() in t.lower():
+                    page.bring_to_front()
+                    return context, page
+            except Exception:
+                pass
     page = context.pages[0] if context.pages else context.new_page()
     page.bring_to_front()
     return context, page
@@ -91,6 +95,24 @@ def cmd_list_tabs(args):
             url = target.url or "about:blank"
             print(f"{i:<6} | {title[:38]:<40} | {url[:50]}")
         return
+
+    try:
+        import urllib.request
+        req = urllib.request.Request(f"{cdp_url}/json/list", headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            pages = [t for t in data if isinstance(t, dict) and t.get("type") == "page"]
+            print(f"\nConnected to Chrome CDP ({cdp_url})")
+            print(f"Total open tabs: {len(pages)}\n")
+            print(f"{'INDEX':<6} | {'TITLE':<40} | {'URL'}")
+            print("-" * 90)
+            for i, page in enumerate(pages):
+                title = page.get("title", "") or "about:blank"
+                url = page.get("url", "") or "about:blank"
+                print(f"{i:<6} | {title[:38]:<40} | {url[:50]}")
+            return
+    except Exception:
+        pass
 
     from playwright.sync_api import sync_playwright
 
