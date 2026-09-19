@@ -225,7 +225,7 @@ def cmd_observe(args):
             from browser_core.recipes import RecipeStore, suggest_for_url
             store = _recipe_store(args)
             store.save_sitemap(fast_result.page_url, fast_result.tree)
-            suggested = suggest_for_url(fast_result.page_url, recipe_store=store, memory_root=getattr(args, "memory_root", None))
+            suggested = suggest_for_url(fast_result.page_url, recipe_store=store, memory_root=getattr(args, "memory_root", None), tree=fast_result.tree)
             dict_res["suggested_recipes"] = suggested
         except Exception:
             pass
@@ -239,7 +239,7 @@ def cmd_observe(args):
             from browser_core.recipes import RecipeStore, suggest_for_url
             store = _recipe_store(args)
             store.save_sitemap(result.page_url, result.tree)
-            suggested = suggest_for_url(result.page_url, recipe_store=store, memory_root=getattr(args, "memory_root", None))
+            suggested = suggest_for_url(result.page_url, recipe_store=store, memory_root=getattr(args, "memory_root", None), tree=result.tree)
             dict_res["suggested_recipes"] = suggested
         except Exception:
             pass
@@ -507,9 +507,10 @@ def _recipe_engine(manager, store=None):
     return RecipeEngine(manager)
 
 
-def _execute_recipe(engine, recipe, page, params):
+def _execute_recipe(engine, recipe, page, params, allow_r4: bool = False):
     execute = getattr(engine, "execute")
     for kwargs in (
+        {"recipe": recipe, "page": page, "params": params, "allow_r4": allow_r4},
         {"recipe": recipe, "page": page, "params": params},
         {"recipe": recipe, "page": page, "parameters": params},
     ):
@@ -533,8 +534,9 @@ def cmd_recipe_run(args):
     mem = _learning_memory(args)
     recipe = _store_get(store, args.recipe_id, mem)
     manager, page = _manager_page(args)
+    allow_r4 = bool(getattr(args, "allow_irreversible", False))
     try:
-        result = _execute_recipe(_recipe_engine(manager, store), recipe, page, params)
+        result = _execute_recipe(_recipe_engine(manager, store), recipe, page, params, allow_r4=allow_r4)
         _json(_recipe_value(result))
     finally:
         manager.close()
@@ -854,6 +856,7 @@ def _parser():
     p_run = recipe_sub.add_parser("run", help="Execute a stored recipe against the active tab")
     p_run.add_argument("recipe_id")
     p_run.add_argument("--params", nargs="?", const="{}", default="{}", help="JSON object of recipe parameters")
+    p_run.add_argument("--allow-irreversible", "--allow-r4", dest="allow_irreversible", action="store_true", default=False, help="Allow execution of R4 (irreversible/destructive) actions")
     p_run.add_argument("--recipes-dir", default=None, help="Recipe directory (defaults to ./recipes)")
     p_run.add_argument("--memory-root", default=None, help="Learning memory root")
     p_candidates = recipe_sub.add_parser("candidates", help="List locally learned draft recipes")

@@ -127,7 +127,7 @@ class PageManager:
         try:
             from .recipes import suggest_for_url
             store = recipe_store or self.recipe_store
-            suggested = suggest_for_url(page.url, recipe_store=store, memory_root=memory_root)
+            suggested = suggest_for_url(page.url, recipe_store=store, memory_root=memory_root, tree=nodes)
         except Exception:
             pass
 

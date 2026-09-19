@@ -202,3 +202,81 @@ class Lease:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+class RiskClass:
+    R0_READONLY = "R0"             # observe, inspect, non-mutating eval
+    R1_REVERSIBLE_NAV = "R1"       # tab navigation, filters, accordion toggle
+    R2_LOCAL_MUTABLE = "R2"        # form fills, checkboxes, drafts
+    R3_PERSISTENT_MUTATION = "R3"  # form submit, save settings, create entity
+    R4_IRREVERSIBLE = "R4"         # payment, deletion, publish, checkout, transfer, send
+
+
+class ExecutionOutcome:
+    CONFIRMED_SUCCESS = "CONFIRMED_SUCCESS"
+    SAFE_FAILURE = "SAFE_FAILURE"
+    UNKNOWN_SIDE_EFFECT = "UNKNOWN_SIDE_EFFECT"
+
+
+class PreconditionFailedError(RuntimeError):
+    """Raised when a recipe precondition or required anchor is missing."""
+    pass
+
+
+class ForbiddenAnchorError(RuntimeError):
+    """Raised when a forbidden anchor (e.g. error dialog or conflict) is present."""
+    pass
+
+
+class RiskGateError(RuntimeError):
+    """Raised when a recipe action exceeds the permitted risk threshold."""
+    pass
+
+
+class UnknownSideEffectError(RuntimeError):
+    """Raised when an action fails during or after persistent mutation and side effect cannot be verified."""
+    pass
+
+
+@dataclass(slots=True)
+class SemanticAnchor:
+    role: str = ""
+    name: str = ""
+    tag: str = ""
+    text_contains: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class MatcherSpec:
+    required_anchors: list[dict[str, Any]] = field(default_factory=list)
+    forbidden_anchors: list[dict[str, Any]] = field(default_factory=list)
+    semantic_fingerprint: dict[str, Any] = field(default_factory=dict)
+    min_similarity: float = 0.70
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class SafetySpec:
+    max_risk: str = "R2"
+    allow_r4: bool = False
+    unknown_effect_policy: str = "reconcile"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class HealthStats:
+    executions: int = 0
+    successes: int = 0
+    failures: int = 0
+    health_score: float = 1.0
+    semantic_similarity_ewma: float = 1.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)

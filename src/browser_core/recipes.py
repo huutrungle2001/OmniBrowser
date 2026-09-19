@@ -7,7 +7,7 @@ the page no longer matches the recorded procedure.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 import fnmatch
 import json
 import os
@@ -24,7 +24,19 @@ from uuid import uuid4
 
 from playwright.sync_api import Page
 
-from .contracts import DOMNodeRef
+from .contracts import (
+    DOMNodeRef,
+    ExecutionOutcome,
+    ForbiddenAnchorError,
+    HealthStats,
+    MatcherSpec,
+    PreconditionFailedError,
+    RiskClass,
+    RiskGateError,
+    SafetySpec,
+    SemanticAnchor,
+    UnknownSideEffectError,
+)
 from .engine import act
 from .page_manager import PageManager, manager_for_page
 
@@ -40,6 +52,9 @@ _PHONE_KEY = re.compile(r"(?i)(phone|mobile|tel)")
 _NAME_KEY = re.compile(r"(?i)(first.?name|last.?name|full.?name|username|user|login)")
 _SEARCH_KEY = re.compile(r"(?i)(search|query|keyword|filter|find)")
 _FRAGILE_SELECTOR = re.compile(r"(?i)(:nth-(?:child|of-type)\(|^/|//)")
+_IRREVERSIBLE_REGEX = re.compile(r"\b(delete|remove|destroy|terminate|purge|drop|wipe|revoke|pay|payment|checkout|buy|purchase|charge|transfer|send\s*email|send\s*money|publish|deploy)\b", re.I)
+_PERSISTENT_REGEX = re.compile(r"\b(submit|save|update|create|confirm|apply|commit|sign\s*in|login|register|enroll|post|insert)\b", re.I)
+_NAV_REGEX = re.compile(r"\b(tab|nav|link|menu|expand|collapse|filter|page|next|prev|breadcrumb|accordion)\b", re.I)
 
 
 class AnchorAmbiguous(ValueError):
@@ -48,6 +63,201 @@ class AnchorAmbiguous(ValueError):
 
 class InvalidExecutableArtifact(ValueError):
     """The provided file or artifact is not an executable recipe or candidate."""
+
+
+def classify_action_risk(action: str, target: Any = None, value: Any = None) -> str:
+    """Classify an action into Risk Classes R0-R4."""
+    action_lower = str(action).strip().lower()
+    target_str = str(target or "").lower()
+    value_str = str(value or "").lower()
+
+    if _IRREVERSIBLE_REGEX.search(target_str) or _IRREVERSIBLE_REGEX.search(value_str):
+        return RiskClass.R4_IRREVERSIBLE
+
+    if _PERSISTENT_REGEX.search(target_str) or _PERSISTENT_REGEX.search(value_str):
+        return RiskClass.R3_PERSISTENT_MUTATION
+
+    if action_lower in {"observe", "inspect", "wait_for"}:
+        return RiskClass.R0_READONLY
+
+    if action_lower == "click":
+        if _NAV_REGEX.search(target_str):
+            return RiskClass.R1_REVERSIBLE_NAV
+        return RiskClass.R2_LOCAL_MUTABLE
+
+    if action_lower in {"fill", "select", "upload"}:
+        return RiskClass.R2_LOCAL_MUTABLE
+
+    if action_lower == "eval":
+        if _IRREVERSIBLE_REGEX.search(value_str):
+            return RiskClass.R4_IRREVERSIBLE
+        if _PERSISTENT_REGEX.search(value_str):
+            return RiskClass.R3_PERSISTENT_MUTATION
+        return RiskClass.R0_READONLY
+
+    return RiskClass.R2_LOCAL_MUTABLE
+
+
+def get_recipe_risk(recipe: Any) -> str:
+    """Determine overall risk class of a recipe as the maximum risk of its steps."""
+    steps = getattr(recipe, "steps", [])
+    if not steps:
+        return RiskClass.R0_READONLY
+    risk_order = [
+        RiskClass.R0_READONLY,
+        RiskClass.R1_REVERSIBLE_NAV,
+        RiskClass.R2_LOCAL_MUTABLE,
+        RiskClass.R3_PERSISTENT_MUTATION,
+        RiskClass.R4_IRREVERSIBLE,
+    ]
+    highest = RiskClass.R0_READONLY
+    for step in steps:
+        action = getattr(step, "action", "") or (step.get("action", step.get("op", "")) if isinstance(step, dict) else "")
+        target = getattr(step, "target", None) or (step.get("target") if isinstance(step, dict) else None)
+        value = getattr(step, "value", None) or (step.get("value") if isinstance(step, dict) else None)
+        risk = classify_action_risk(action, target, value)
+        if risk_order.index(risk) > risk_order.index(highest):
+            highest = risk
+    return highest
+
+
+def _find_anchor_in_tree(anchor: dict[str, Any], tree_nodes: Any) -> bool:
+    """Check if an anchor definition matches at least one element in tree_nodes."""
+    if not anchor or not isinstance(anchor, dict):
+        return True
+    if isinstance(tree_nodes, dict):
+        nodes = tree_nodes.get("tree", tree_nodes.get("elements", []))
+    elif isinstance(tree_nodes, list):
+        nodes = tree_nodes
+    else:
+        nodes = []
+
+    exp_role = str(anchor.get("role", "")).strip().lower()
+    exp_name = str(anchor.get("name", "")).strip().lower()
+    exp_text = str(anchor.get("text_contains", "")).strip().lower()
+    exp_tag = str(anchor.get("tag", "")).strip().lower()
+
+    for node in nodes:
+        n_dict = asdict(node) if hasattr(node, "__dataclass_fields__") else (dict(node) if isinstance(node, (dict, Mapping)) else {})
+        n_role = str(n_dict.get("role", "")).strip().lower()
+        n_name = str(n_dict.get("name", "")).strip().lower()
+        n_value = str(n_dict.get("value", "")).strip().lower()
+        n_tag = str(n_dict.get("tag", "")).strip().lower()
+
+        if exp_role and exp_role != n_role:
+            continue
+        if exp_tag and exp_tag != n_tag:
+            continue
+        if exp_name:
+            if exp_name not in n_name and n_name not in exp_name:
+                continue
+        if exp_text:
+            if exp_text not in n_name and exp_text not in n_value:
+                continue
+        return True
+    return False
+
+
+def extract_semantic_fingerprint(tree_nodes: Any) -> set[tuple[str, str]]:
+    """Extract normalized (role, name) pairs for stable structural elements."""
+    if isinstance(tree_nodes, dict):
+        nodes = tree_nodes.get("tree", tree_nodes.get("elements", []))
+    elif isinstance(tree_nodes, list):
+        nodes = tree_nodes
+    else:
+        nodes = []
+
+    fp = set()
+    for node in nodes:
+        n_dict = asdict(node) if hasattr(node, "__dataclass_fields__") else (dict(node) if isinstance(node, (dict, Mapping)) else {})
+        role = str(n_dict.get("role", "")).strip().lower()
+        name = str(n_dict.get("name", "")).strip().lower()
+        if name and role in {"heading", "button", "link", "textbox", "combobox", "dialog", "navigation", "main", "tab"}:
+            fp.add((role, name))
+    return fp
+
+
+def calculate_semantic_similarity(fp1: set[tuple[str, str]], fp2: set[tuple[str, str]]) -> float:
+    """Compute Jaccard similarity between two semantic element fingerprints."""
+    if not fp1 and not fp2:
+        return 1.0
+    union = fp1 | fp2
+    if not union:
+        return 1.0
+    intersection = fp1 & fp2
+    return round(len(intersection) / len(union), 3)
+
+
+def match_page_state(recipe: Any, page_url: str, tree_nodes: Any) -> dict[str, Any]:
+    """Evaluate composite matching: required anchors, forbidden anchors, route, and semantic similarity."""
+    matcher = getattr(recipe, "matcher", None) or MatcherSpec()
+
+    # 1. Hard veto: Forbidden anchors
+    for fa in getattr(matcher, "forbidden_anchors", []):
+        if _find_anchor_in_tree(fa, tree_nodes):
+            name = fa.get("name") or fa.get("role") or str(fa)
+            return {
+                "matched": False,
+                "score": 0.0,
+                "reason": f"forbidden_anchor_present: {name}",
+                "semantic_similarity": 0.0,
+                "route_similarity": 0.0,
+            }
+
+    # 2. Hard precondition: Required anchors
+    missing_required = []
+    for ra in getattr(matcher, "required_anchors", []):
+        if not _find_anchor_in_tree(ra, tree_nodes):
+            missing_required.append(ra)
+
+    if missing_required:
+        return {
+            "matched": False,
+            "score": 0.0,
+            "reason": f"missing_required_anchors: {len(missing_required)} missing",
+            "missing": missing_required,
+            "semantic_similarity": 0.0,
+            "route_similarity": 0.0,
+        }
+
+    # 3. Route similarity
+    route_matched = recipe.matches_url(page_url) if hasattr(recipe, "matches_url") else False
+    route_sim = 1.0 if route_matched else 0.0
+
+    # 4. Semantic similarity
+    live_fp = extract_semantic_fingerprint(tree_nodes)
+    recorded_fp = set()
+    raw_fp = getattr(matcher, "semantic_fingerprint", {}) or {}
+    if isinstance(raw_fp, dict):
+        fp_raw = raw_fp.get("elements", [])
+        recorded_fp = {tuple(x) for x in fp_raw}
+
+    if recorded_fp:
+        sem_sim = calculate_semantic_similarity(recorded_fp, live_fp)
+    else:
+        sem_sim = 1.0 if route_matched else 0.5
+
+    # 5. Anchor coverage
+    anchor_cov = 1.0 if not missing_required else 0.0
+
+    # 6. Health trust prior
+    health_score = getattr(getattr(recipe, "health", None), "health_score", 1.0)
+
+    # 7. Composite score: 0.30*route + 0.40*sem + 0.20*anchor + 0.10*health
+    composite_score = round(0.30 * route_sim + 0.40 * sem_sim + 0.20 * anchor_cov + 0.10 * health_score, 3)
+
+    min_sim = getattr(matcher, "min_similarity", 0.70)
+    matched = bool((composite_score >= min_sim) and (route_matched or sem_sim >= 0.70))
+
+    return {
+        "matched": matched,
+        "score": composite_score,
+        "semantic_similarity": sem_sim,
+        "route_similarity": route_sim,
+        "anchor_coverage": anchor_cov,
+        "health_score": health_score,
+    }
+
 
 
 def _memory_root(root: str | Path | None = None) -> Path:
@@ -175,6 +385,10 @@ class RecipeStep:
     def op(self) -> str:
         return self.action
 
+    @property
+    def risk(self) -> str:
+        return classify_action_risk(self.action, self.target, self.value)
+
 
 @dataclass(slots=True)
 class Recipe:
@@ -185,6 +399,11 @@ class Recipe:
     steps: list[RecipeStep] = field(default_factory=list)
     validation: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    matcher: MatcherSpec = field(default_factory=MatcherSpec)
+    preconditions: list[dict[str, Any]] = field(default_factory=list)
+    postconditions: list[dict[str, Any]] = field(default_factory=list)
+    safety: SafetySpec = field(default_factory=SafetySpec)
+    health: HealthStats = field(default_factory=HealthStats)
 
     def __post_init__(self) -> None:
         self.metadata = _defaults(self.metadata)
@@ -203,10 +422,53 @@ class Recipe:
         missing = [key for key in required if key not in data]
         if missing:
             raise ValueError(f"Recipe missing required field(s): {', '.join(missing)}")
+
+        matcher_raw = data.get("matcher") or {}
+        if isinstance(matcher_raw, MatcherSpec):
+            matcher = matcher_raw
+        elif isinstance(matcher_raw, dict):
+            matcher = MatcherSpec(
+                required_anchors=list(matcher_raw.get("required_anchors", [])),
+                forbidden_anchors=list(matcher_raw.get("forbidden_anchors", [])),
+                semantic_fingerprint=dict(matcher_raw.get("semantic_fingerprint", {})),
+                min_similarity=float(matcher_raw.get("min_similarity", 0.70)),
+            )
+        else:
+            matcher = MatcherSpec()
+
+        safety_raw = data.get("safety") or {}
+        if isinstance(safety_raw, SafetySpec):
+            safety = safety_raw
+        elif isinstance(safety_raw, dict):
+            safety = SafetySpec(
+                max_risk=str(safety_raw.get("max_risk", "R2")),
+                allow_r4=bool(safety_raw.get("allow_r4", False)),
+                unknown_effect_policy=str(safety_raw.get("unknown_effect_policy", "reconcile")),
+            )
+        else:
+            safety = SafetySpec()
+
+        health_raw = data.get("health") or {}
+        if isinstance(health_raw, HealthStats):
+            health = health_raw
+        elif isinstance(health_raw, dict):
+            health = HealthStats(
+                executions=int(health_raw.get("executions", 0)),
+                successes=int(health_raw.get("successes", 0)),
+                failures=int(health_raw.get("failures", 0)),
+                health_score=float(health_raw.get("health_score", 1.0)),
+                semantic_similarity_ewma=float(health_raw.get("semantic_similarity_ewma", 1.0)),
+            )
+        else:
+            health = HealthStats()
+
         return cls(id=str(data["id"]), name=str(data["name"]),
                    description=str(data.get("description", "")),
                    domain_pattern=data["domain_pattern"], steps=list(data["steps"]),
-                   validation=dict(data.get("validation", {})), metadata=dict(data.get("metadata", {})))
+                   validation=dict(data.get("validation", {})), metadata=dict(data.get("metadata", {})),
+                   matcher=matcher, preconditions=list(data.get("preconditions", [])),
+                   postconditions=list(data.get("postconditions", [])),
+                   safety=safety, health=health)
 
     @classmethod
     def from_json(cls, payload: str | bytes | Path) -> "Recipe":
@@ -219,13 +481,25 @@ class Recipe:
 
     def to_dict(self) -> dict[str, Any]:
         kind = "omnibrowser.recipe_candidate" if (self.metadata.get("automatic") or self.metadata.get("status") == "draft") else "omnibrowser.recipe"
-        return {"kind": kind, "schema_version": 1, "id": self.id, "name": self.name, "description": self.description,
+        return {"kind": kind, "schema_version": 2, "id": self.id, "name": self.name, "description": self.description,
                 "domain_pattern": self.domain_pattern,
                 "steps": [step.to_dict() for step in self.steps],
-                "validation": self.validation, "metadata": self.metadata}
+                "validation": self.validation, "metadata": self.metadata,
+                "matcher": self.matcher.to_dict(),
+                "preconditions": self.preconditions,
+                "postconditions": self.postconditions,
+                "safety": self.safety.to_dict(),
+                "health": self.health.to_dict()}
 
     def to_json(self, *, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent) + "\n"
+
+    def match(self, page_url: str, tree_nodes: Any = None) -> dict[str, Any]:
+        return match_page_state(self, page_url, tree_nodes)
+
+    @property
+    def max_risk(self) -> str:
+        return get_recipe_risk(self)
 
     def validate(self) -> None:
         if not self.id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", self.id):
@@ -390,6 +664,10 @@ class RecipeStore:
     def record_success(self, recipe: Recipe) -> None:
         recipe.metadata["success_count"] = int(recipe.metadata.get("success_count", 0)) + 1
         recipe.metadata["last_failure_reason"] = None
+        if hasattr(recipe, "health"):
+            recipe.health.executions += 1
+            recipe.health.successes += 1
+            recipe.health.health_score = round(recipe.health.successes / recipe.health.executions, 3)
 
     def record_failure(self, recipe: Recipe, *, step_index: int, reason: str, target: str | None) -> None:
         ledger = recipe.metadata.setdefault("failure_ledger", [])
@@ -398,6 +676,10 @@ class RecipeStore:
         recipe.metadata["failure_ledger"] = ledger[-20:]
         recipe.metadata["failure_count"] = int(recipe.metadata.get("failure_count", 0)) + 1
         recipe.metadata["last_failure_reason"] = entry["reason"]
+        if hasattr(recipe, "health"):
+            recipe.health.executions += 1
+            recipe.health.failures += 1
+            recipe.health.health_score = round(recipe.health.successes / recipe.health.executions, 3)
 
 
 @dataclass(slots=True)
@@ -408,10 +690,17 @@ class RecipeExecutionResult:
     fallback_required: bool = False
     message: str = ""
     failure: dict[str, Any] | None = None
+    outcome: str = ExecutionOutcome.CONFIRMED_SUCCESS
+    risk_class: str = RiskClass.R0_READONLY
+    reconciled: bool = False
+    health_score: float = 1.0
+    match_score: float = 1.0
 
     def to_dict(self) -> dict[str, Any]:
         return {"ok": self.ok, "recipe_id": self.recipe_id, "completed_steps": self.completed_steps,
-                "fallback_required": self.fallback_required, "message": self.message, "failure": self.failure}
+                "fallback_required": self.fallback_required, "message": self.message, "failure": self.failure,
+                "outcome": self.outcome, "risk_class": self.risk_class, "reconciled": self.reconciled,
+                "health_score": self.health_score, "match_score": self.match_score}
 
     def __getitem__(self, key: str) -> Any:
         return self.to_dict()[key]
@@ -775,7 +1064,7 @@ class RecipeEngine:
         self.store = store
 
     def execute(self, recipe: Recipe | str, page: Page, params: Mapping[str, Any] | None = None,
-                *, manager: PageManager | None = None) -> RecipeExecutionResult:
+                *, manager: PageManager | None = None, allow_r4: bool = False) -> RecipeExecutionResult:
         if isinstance(recipe, str):
             if self.store is None:
                 raise ValueError("RecipeStore is required when recipe is an id")
@@ -784,36 +1073,117 @@ class RecipeEngine:
                 raise KeyError(f"Unknown recipe: {recipe}")
             recipe = found
         params = params or {}
+        page_manager = manager or (self.store and getattr(self.store, "manager", None)) or manager_for_page(page)
+
+        recipe_risk = get_recipe_risk(recipe)
+        safety = getattr(recipe, "safety", None) or SafetySpec()
+        if recipe_risk == RiskClass.R4_IRREVERSIBLE and not allow_r4 and not getattr(safety, "allow_r4", False):
+            raise RiskGateError(f"Recipe '{recipe.id}' requires R4 (irreversible/destructive) actions. Execution blocked without explicit allow_r4=True.")
+
+        persistent_mutation_started = False
+        index = 0
+        target = None
+
         try:
             if not recipe.matches_url(page.url):
                 raise ValueError(f"recipe domain does not match active URL: {page.url}")
+
+            # Guard Phase: evaluate anchors against page if manager is available
+            if page_manager is not None:
+                try:
+                    obs = page_manager.observe(page)
+                    match_res = match_page_state(recipe, page.url, obs.tree)
+                    if not match_res.get("matched", True):
+                        reason = match_res.get("reason", "")
+                        if "forbidden" in reason:
+                            raise ForbiddenAnchorError(f"Forbidden anchor detected on page: {reason}")
+                        if "missing" in reason:
+                            raise PreconditionFailedError(f"Precondition failed: {reason}")
+                except (ForbiddenAnchorError, PreconditionFailedError):
+                    raise
+                except Exception:
+                    pass
+
             for key in _TEMPLATE.findall(json.dumps(recipe.to_dict())):
                 if key not in params:
                     raise ValueError(f"missing recipe parameter: {key}")
-            page_manager = manager or (self.store and getattr(self.store, "manager", None)) or manager_for_page(page)
+
             for index, step in enumerate(recipe.steps):
                 target = _substitute(step.target, params)
                 value = _substitute(step.value, params)
                 expect = _substitute(step.expect, params)
                 timeout = min(max(int(step.timeout_ms), 1), 30000)
+
+                step_risk = classify_action_risk(step.action, target, value)
+                if step_risk in {RiskClass.R3_PERSISTENT_MUTATION, RiskClass.R4_IRREVERSIBLE}:
+                    persistent_mutation_started = True
+
                 self._execute_step(page, page_manager, step.action, target, value, expect, timeout)
+
+            # Postcondition Phase
+            if getattr(recipe, "postconditions", None) and page_manager is not None:
+                obs_post = page_manager.observe(page)
+                for post in recipe.postconditions:
+                    if not _find_anchor_in_tree(post, obs_post.tree):
+                        raise RuntimeError(f"Postcondition anchor not found: {post}")
+
             resolved_validation = _substitute(recipe.validation, params)
             self._validate(resolved_validation, page, page_manager)
+
+        except (ForbiddenAnchorError, PreconditionFailedError, RiskGateError):
+            raise
         except Exception as error:
-            index = locals().get("index", 0)
-            target = locals().get("target", None)
             reason = _safe_reason(str(error))
             failure = {"step_index": index, "reason": reason, "target": _safe_target(target)}
+            reconciled = False
+            outcome = ExecutionOutcome.SAFE_FAILURE
+
+            if persistent_mutation_started:
+                policy = getattr(safety, "unknown_effect_policy", "reconcile")
+                if policy == "reconcile" and getattr(recipe, "postconditions", None) and page_manager is not None:
+                    try:
+                        obs_recon = page_manager.observe(page)
+                        if all(_find_anchor_in_tree(post, obs_recon.tree) for post in recipe.postconditions):
+                            # Succeeded despite the error!
+                            reconciled = True
+                            outcome = ExecutionOutcome.CONFIRMED_SUCCESS
+                            if self.store:
+                                self.store.record_success(recipe)
+                            return RecipeExecutionResult(
+                                True, recipe.id, index + 1, False,
+                                "Recipe recovered via postcondition reconciliation.",
+                                None, outcome=outcome, risk_class=recipe_risk, reconciled=True,
+                                health_score=recipe.health.health_score if hasattr(recipe, "health") else 1.0
+                            )
+                    except Exception:
+                        pass
+                outcome = ExecutionOutcome.UNKNOWN_SIDE_EFFECT
+
             if self.store:
                 self.store.record_failure(recipe, step_index=index, reason=reason, target=target)
-            return RecipeExecutionResult(False, recipe.id, index, True,
-                                         "Recipe fast path failed; fallback to Level 1 observe() / act() and re-scan the page.", failure)
+            return RecipeExecutionResult(
+                False, recipe.id, index, True,
+                f"Recipe fast path failed; fallback to Level 1 observe() / act() and re-scan the page. Reason: {reason}",
+                failure, outcome=outcome, risk_class=recipe_risk, reconciled=reconciled,
+                health_score=recipe.health.health_score if hasattr(recipe, "health") else 1.0
+            )
+
         recipe.metadata["last_failure_reason"] = None
         if self.store:
             self.store.record_success(recipe)
         else:
             recipe.metadata["success_count"] = int(recipe.metadata.get("success_count", 0)) + 1
-        return RecipeExecutionResult(True, recipe.id, len(recipe.steps), False, "Recipe completed successfully.")
+            if hasattr(recipe, "health"):
+                recipe.health.executions += 1
+                recipe.health.successes += 1
+                recipe.health.health_score = round(recipe.health.successes / recipe.health.executions, 3)
+
+        return RecipeExecutionResult(
+            True, recipe.id, len(recipe.steps), False,
+            "Recipe completed successfully.",
+            None, outcome=ExecutionOutcome.CONFIRMED_SUCCESS, risk_class=recipe_risk,
+            health_score=recipe.health.health_score if hasattr(recipe, "health") else 1.0
+        )
 
     run = execute
 
@@ -1044,6 +1414,7 @@ def suggest_for_url(
     url: str,
     recipe_store: RecipeStore | None = None,
     memory_root: str | Path | None = None,
+    tree: Any = None,
 ) -> list[dict[str, Any]]:
     """Match current URL against domain recipes and return ranked candidates with confidence scores."""
     suggestions: list[dict[str, Any]] = []
@@ -1056,15 +1427,24 @@ def suggest_for_url(
     for r in matching_curated:
         if r.id in seen_ids:
             continue
-        # Calculate confidence
-        if isinstance(r.domain_pattern, str) and u_domain in r.domain_pattern:
-            confidence = 0.95
-        elif isinstance(r.domain_pattern, list) and any(u_domain in p for p in r.domain_pattern):
-            confidence = 0.95
-        elif r.domain_pattern == "*":
-            confidence = 0.80
+        risk_class = get_recipe_risk(r)
+        match_res = match_page_state(r, url, tree) if tree is not None else {"matched": True, "score": 0.95}
+        if tree is not None and not match_res.get("matched", False):
+            continue
+
+        if tree is not None:
+            confidence = match_res.get("score", 0.95)
+            guard_status = "passed"
         else:
-            confidence = 0.90
+            if isinstance(r.domain_pattern, str) and u_domain in r.domain_pattern:
+                confidence = 0.95
+            elif isinstance(r.domain_pattern, list) and any(u_domain in p for p in r.domain_pattern):
+                confidence = 0.95
+            elif r.domain_pattern == "*":
+                confidence = 0.80
+            else:
+                confidence = 0.90
+            guard_status = "unknown"
 
         # Extract required parameters
         params = sorted({m.group(1) for m in _TEMPLATE.finditer(json.dumps(r.to_dict()))})
@@ -1077,10 +1457,17 @@ def suggest_for_url(
             argv = ["python3", "scripts/cdp_controller.py", "recipe", "run", str(r.id)]
             cmd = f"python3 scripts/cdp_controller.py recipe run {shlex.quote(str(r.id))}"
 
+        if risk_class == RiskClass.R4_IRREVERSIBLE:
+            argv.append("--allow-irreversible")
+            cmd += " --allow-irreversible"
+
         suggestions.append({
             "recipe_id": r.id,
             "name": r.name,
             "confidence": confidence,
+            "match_score": confidence,
+            "risk_class": risk_class,
+            "guard_status": guard_status,
             "command": cmd,
             "argv": argv,
             "source": "curated",
@@ -1097,9 +1484,19 @@ def suggest_for_url(
             if not cid or cid in seen_ids:
                 continue
             meta = c.get("metadata", {})
-            confidence = float(meta.get("confidence", 0.88 if meta.get("source") == "flight_recorder" else 0.85))
-            if meta.get("status") == "promoted":
-                confidence = 0.95
+            risk_class = get_recipe_risk(c)
+            match_res = match_page_state(c, url, tree) if tree is not None else {"matched": True, "score": 0.88}
+            if tree is not None and not match_res.get("matched", False):
+                continue
+
+            if tree is not None:
+                confidence = match_res.get("score", 0.88)
+                guard_status = "passed"
+            else:
+                confidence = float(meta.get("confidence", 0.88 if meta.get("source") == "flight_recorder" else 0.85))
+                if meta.get("status") == "promoted":
+                    confidence = 0.95
+                guard_status = "unknown"
 
             params = sorted({
                 str(step.get("value", {}).get("$ref"))
@@ -1115,10 +1512,17 @@ def suggest_for_url(
                 argv = ["python3", "scripts/cdp_controller.py", "recipe", "run", str(cid)]
                 cmd = f"python3 scripts/cdp_controller.py recipe run {shlex.quote(str(cid))}"
 
+            if risk_class == RiskClass.R4_IRREVERSIBLE:
+                argv.append("--allow-irreversible")
+                cmd += " --allow-irreversible"
+
             suggestions.append({
                 "recipe_id": cid,
                 "name": c.get("name", cid),
                 "confidence": round(confidence, 2),
+                "match_score": round(confidence, 2),
+                "risk_class": risk_class,
+                "guard_status": guard_status,
                 "command": cmd,
                 "argv": argv,
                 "source": "learned",
