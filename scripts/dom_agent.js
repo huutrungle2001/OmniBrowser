@@ -11,11 +11,12 @@
 
   const interactiveRoles = new Set([
     "button", "checkbox", "combobox", "link", "menuitem", "slider",
-    "switch", "tab", "textbox"
+    "switch", "tab", "textbox", "dialog", "alert", "alertdialog", "status"
   ]);
 
   const roleFor = (element) => {
     if (element.getAttribute("role")) return element.getAttribute("role");
+    if (element.hasAttribute("aria-live")) return "status";
     if (element.tagName === "A") return "link";
     if (element.tagName === "BUTTON") return "button";
     if (element.tagName === "SELECT") return "combobox";
@@ -29,6 +30,7 @@
     }
     return element.isContentEditable ? "textbox" : "generic";
   };
+
 
   const labelText = (element) => {
     const ariaLabel = element.getAttribute("aria-label");
@@ -69,8 +71,10 @@
     if (element.matches("button, a[href], input:not([type='hidden']), textarea, select")) return true;
     if (element.isContentEditable) return true;
     if (interactiveRoles.has(roleFor(element))) return true;
+    if (element.hasAttribute("aria-live")) return true;
     return element.tabIndex >= 0 && Boolean(labelText(element));
   };
+
 
   const tokenFor = (element) => {
     let token = nodeTokens.get(element);

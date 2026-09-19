@@ -52,8 +52,14 @@ _PHONE_KEY = re.compile(r"(?i)(phone|mobile|tel)")
 _NAME_KEY = re.compile(r"(?i)(first.?name|last.?name|full.?name|username|user|login)")
 _SEARCH_KEY = re.compile(r"(?i)(search|query|keyword|filter|find)")
 _FRAGILE_SELECTOR = re.compile(r"(?i)(:nth-(?:child|of-type)\(|^/|//)")
-_IRREVERSIBLE_REGEX = re.compile(r"\b(delete|remove|destroy|terminate|purge|drop|wipe|revoke|pay|payment|checkout|buy|purchase|charge|transfer|send\s*email|send\s*money|publish|deploy)\b", re.I)
-_PERSISTENT_REGEX = re.compile(r"\b(submit|save|update|create|confirm|apply|commit|sign\s*in|login|register|enroll|post|insert)\b", re.I)
+_IRREVERSIBLE_REGEX = re.compile(
+    r"(?:\b|_)(delete|remove|destroy|terminate|purge|drop|wipe|revoke|pay|payment|checkout|buy|purchase|charge|transfer|send|publish|deploy|place\s*order|reset|disable|book)(?:\b|_)",
+    re.I,
+)
+_PERSISTENT_REGEX = re.compile(
+    r"(?:\b|_)(submit|save|update|create|confirm|apply|commit|sign\s*in|login|register|enroll|post|insert|approve|continue|ok)(?:\b|_)",
+    re.I,
+)
 _NAV_REGEX = re.compile(r"\b(tab|nav|link|menu|expand|collapse|filter|page|next|prev|breadcrumb|accordion)\b", re.I)
 
 
@@ -65,16 +71,32 @@ class InvalidExecutableArtifact(ValueError):
     """The provided file or artifact is not an executable recipe or candidate."""
 
 
-def classify_action_risk(action: str, target: Any = None, value: Any = None) -> str:
-    """Classify an action into Risk Classes R0-R4."""
+def classify_action_risk(
+    action: str,
+    target: Any = None,
+    value: Any = None,
+    explicit_risk: str | None = None,
+) -> str:
+    """Classify an action into Risk Classes R0-R4 with strict precedence to explicit risk metadata."""
+    if explicit_risk:
+        clean_exp = str(explicit_risk).strip().upper()
+        if clean_exp in {
+            RiskClass.R0_READONLY,
+            RiskClass.R1_REVERSIBLE_NAV,
+            RiskClass.R2_LOCAL_MUTABLE,
+            RiskClass.R3_PERSISTENT_MUTATION,
+            RiskClass.R4_IRREVERSIBLE,
+        }:
+            return clean_exp
+
     action_lower = str(action).strip().lower()
     target_str = str(target or "").lower()
     value_str = str(value or "").lower()
 
-    if _IRREVERSIBLE_REGEX.search(target_str) or _IRREVERSIBLE_REGEX.search(value_str):
+    if _IRREVERSIBLE_REGEX.search(target_str) or _IRREVERSIBLE_REGEX.search(value_str) or _IRREVERSIBLE_REGEX.search(action_lower):
         return RiskClass.R4_IRREVERSIBLE
 
-    if _PERSISTENT_REGEX.search(target_str) or _PERSISTENT_REGEX.search(value_str):
+    if _PERSISTENT_REGEX.search(target_str) or _PERSISTENT_REGEX.search(value_str) or _PERSISTENT_REGEX.search(action_lower):
         return RiskClass.R3_PERSISTENT_MUTATION
 
     if action_lower in {"observe", "inspect", "wait_for"}:
@@ -85,7 +107,7 @@ def classify_action_risk(action: str, target: Any = None, value: Any = None) -> 
             return RiskClass.R1_REVERSIBLE_NAV
         return RiskClass.R2_LOCAL_MUTABLE
 
-    if action_lower in {"fill", "select", "upload"}:
+    if action_lower in {"fill", "select", "upload", "press"}:
         return RiskClass.R2_LOCAL_MUTABLE
 
     if action_lower == "eval":
@@ -95,14 +117,12 @@ def classify_action_risk(action: str, target: Any = None, value: Any = None) -> 
             return RiskClass.R3_PERSISTENT_MUTATION
         return RiskClass.R0_READONLY
 
-    return RiskClass.R2_LOCAL_MUTABLE
+    # Fail-closed for unknown actions: do NOT default to R2!
+    return RiskClass.R3_PERSISTENT_MUTATION
 
 
 def get_recipe_risk(recipe: Any) -> str:
-    """Determine overall risk class of a recipe as the maximum risk of its steps."""
-    steps = getattr(recipe, "steps", [])
-    if not steps:
-        return RiskClass.R0_READONLY
+    """Determine overall risk class of a recipe as the maximum risk of its steps, respecting explicit metadata."""
     risk_order = [
         RiskClass.R0_READONLY,
         RiskClass.R1_REVERSIBLE_NAV,
@@ -110,15 +130,32 @@ def get_recipe_risk(recipe: Any) -> str:
         RiskClass.R3_PERSISTENT_MUTATION,
         RiskClass.R4_IRREVERSIBLE,
     ]
+    explicit_max = None
+    if isinstance(recipe, dict):
+        safety_dict = recipe.get("safety", {})
+        if isinstance(safety_dict, dict) and safety_dict.get("max_risk"):
+            explicit_max = safety_dict.get("max_risk")
+    elif getattr(recipe, "safety", None) and getattr(recipe.safety, "max_risk", None):
+        explicit_max = recipe.safety.max_risk
+
+    steps = getattr(recipe, "steps", []) if not isinstance(recipe, dict) else recipe.get("steps", [])
     highest = RiskClass.R0_READONLY
     for step in steps:
         action = getattr(step, "action", "") or (step.get("action", step.get("op", "")) if isinstance(step, dict) else "")
         target = getattr(step, "target", None) or (step.get("target") if isinstance(step, dict) else None)
         value = getattr(step, "value", None) or (step.get("value") if isinstance(step, dict) else None)
-        risk = classify_action_risk(action, target, value)
+        step_explicit = getattr(step, "risk_class", None) or (step.get("risk_class", step.get("risk")) if isinstance(step, dict) else None)
+        risk = classify_action_risk(action, target, value, explicit_risk=step_explicit)
         if risk_order.index(risk) > risk_order.index(highest):
             highest = risk
+
+    if explicit_max and explicit_max in risk_order:
+        if risk_order.index(explicit_max) > risk_order.index(highest):
+            highest = explicit_max
+
     return highest
+
+
 
 
 def _find_anchor_in_tree(anchor: dict[str, Any], tree_nodes: Any) -> bool:
@@ -248,15 +285,105 @@ def match_page_state(recipe: Any, page_url: str, tree_nodes: Any) -> dict[str, A
 
     min_sim = getattr(matcher, "min_similarity", 0.70)
     matched = bool((composite_score >= min_sim) and (route_matched or sem_sim >= 0.70))
+    reason = None
+    if not matched:
+        if composite_score < min_sim:
+            reason = f"similarity_below_threshold: {composite_score} < {min_sim}"
+        elif not route_matched and sem_sim < 0.70:
+            reason = f"route_mismatch_and_low_similarity: route={route_sim}, sem={sem_sim}"
+        else:
+            reason = "matching_criteria_not_satisfied"
 
     return {
         "matched": matched,
         "score": composite_score,
+        "reason": reason,
         "semantic_similarity": sem_sim,
         "route_similarity": route_sim,
         "anchor_coverage": anchor_cov,
         "health_score": health_score,
     }
+
+
+def _find_matching_node(anchor: dict[str, Any], nodes: Any) -> dict[str, Any] | None:
+    """Find and return dictionary representation of node matching an anchor, or None."""
+    if not anchor or not isinstance(anchor, dict):
+        return {}
+    if isinstance(nodes, dict):
+        node_list = nodes.get("tree", nodes.get("elements", []))
+    elif isinstance(nodes, list):
+        node_list = nodes
+    else:
+        node_list = []
+
+    exp_role = str(anchor.get("role", "")).strip().lower()
+    exp_name = str(anchor.get("name", "")).strip().lower()
+    exp_text = str(anchor.get("text_contains", "")).strip().lower()
+    exp_tag = str(anchor.get("tag", "")).strip().lower()
+
+    for node in node_list:
+        n_dict = asdict(node) if hasattr(node, "__dataclass_fields__") else (dict(node) if isinstance(node, (dict, Mapping)) else {})
+        n_role = str(n_dict.get("role", "")).strip().lower()
+        n_name = str(n_dict.get("name", "")).strip().lower()
+        n_value = str(n_dict.get("value", "")).strip().lower()
+        n_tag = str(n_dict.get("tag", "")).strip().lower()
+
+        if exp_role and exp_role != n_role:
+            continue
+        if exp_tag and exp_tag != n_tag:
+            continue
+        if exp_name and (exp_name not in n_name and n_name not in exp_name):
+            continue
+        if exp_text and (exp_text not in n_name and exp_text not in n_value):
+            continue
+        return n_dict
+    return None
+
+
+def verify_transition_reconciliation(
+    postconditions: list[dict[str, Any]],
+    baseline_nodes: Any,
+    current_nodes: Any,
+    initial_url: str,
+    current_url: str,
+) -> bool:
+    """
+    Verify that postconditions represent a confirmed state transition
+    rather than a pre-existing state predicate present prior to mutation.
+    """
+    if not postconditions:
+        return False
+
+    matched_current: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for post in postconditions:
+        curr_node = _find_matching_node(post, current_nodes)
+        if curr_node is None:
+            return False
+        matched_current.append((post, curr_node))
+
+    # Evidence of state transition:
+    # 1. URL changed
+    if initial_url and current_url and _safe_url(initial_url) != _safe_url(current_url):
+        return True
+
+    # 2. Check each postcondition against baseline_nodes
+    for post, curr_match in matched_current:
+        base_match = _find_matching_node(post, baseline_nodes)
+        if base_match is None:
+            # Anchor newly materialized as a consequence of the action!
+            return True
+        # Anchor existed in baseline; did its observable state/value change?
+        curr_val = curr_match.get("value", "")
+        base_val = base_match.get("value", "")
+        curr_name = curr_match.get("name", "")
+        base_name = base_match.get("name", "")
+        if (curr_val and curr_val != base_val) or (curr_name and curr_name != base_name):
+            return True
+
+    # If all postcondition anchors were already present in baseline and did not transition,
+    # reconciliation cannot prove mutation occurred.
+    return False
+
 
 
 
@@ -349,6 +476,7 @@ class RecipeStep:
     expect: dict[str, Any] = field(default_factory=dict)
     timeout_ms: int = 5000
     selector: str | None = None
+    risk_class: str | None = None
 
     def __post_init__(self) -> None:
         if self.target is None and self.selector is not None:
@@ -365,9 +493,11 @@ class RecipeStep:
             expect = {}
         if not isinstance(expect, dict):
             raise ValueError("Recipe step expect must be an object")
+        risk_class = data.get("risk_class", data.get("risk"))
         return cls(action=action, target=target,
                    value=data.get("value", data.get("text", data.get("script"))),
-                   expect=dict(expect), timeout_ms=int(data.get("timeout_ms", 5000)))
+                   expect=dict(expect), timeout_ms=int(data.get("timeout_ms", 5000)),
+                   risk_class=str(risk_class).strip().upper() if risk_class else None)
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {"action": self.action}
@@ -379,6 +509,8 @@ class RecipeStep:
             result["expect"] = self.expect
         if self.timeout_ms != 5000:
             result["timeout_ms"] = self.timeout_ms
+        if self.risk_class:
+            result["risk_class"] = self.risk_class
         return result
 
     @property
@@ -387,7 +519,8 @@ class RecipeStep:
 
     @property
     def risk(self) -> str:
-        return classify_action_risk(self.action, self.target, self.value)
+        return self.risk_class or classify_action_risk(self.action, self.target, self.value)
+
 
 
 @dataclass(slots=True)
@@ -670,6 +803,8 @@ class RecipeStore:
             recipe.health.health_score = round(recipe.health.successes / recipe.health.executions, 3)
 
     def record_failure(self, recipe: Recipe, *, step_index: int, reason: str, target: str | None) -> None:
+        if "RiskGateError" in str(reason) or "allow_r4" in str(reason):
+            return
         ledger = recipe.metadata.setdefault("failure_ledger", [])
         entry = {"step_index": step_index, "reason": _safe_reason(reason), "target": _safe_target(target)}
         ledger.append(entry)
@@ -680,6 +815,7 @@ class RecipeStore:
             recipe.health.executions += 1
             recipe.health.failures += 1
             recipe.health.health_score = round(recipe.health.successes / recipe.health.executions, 3)
+
 
 
 @dataclass(slots=True)
@@ -1083,6 +1219,8 @@ class RecipeEngine:
         persistent_mutation_started = False
         index = 0
         target = None
+        baseline_nodes: list[Any] = []
+        initial_url = page.url
 
         try:
             if not recipe.matches_url(page.url):
@@ -1092,13 +1230,18 @@ class RecipeEngine:
             if page_manager is not None:
                 try:
                     obs = page_manager.observe(page)
-                    match_res = match_page_state(recipe, page.url, obs.tree)
+                    baseline_nodes = obs.tree
+                    initial_url = obs.page_url or page.url
+                    match_res = match_page_state(recipe, initial_url, obs.tree)
                     if not match_res.get("matched", True):
-                        reason = match_res.get("reason", "")
+                        reason = match_res.get("reason", "precondition_failed")
                         if "forbidden" in reason:
+                            if hasattr(recipe, "health"):
+                                recipe.health.forbidden_anchor_failures += 1
                             raise ForbiddenAnchorError(f"Forbidden anchor detected on page: {reason}")
-                        if "missing" in reason:
-                            raise PreconditionFailedError(f"Precondition failed: {reason}")
+                        if hasattr(recipe, "health"):
+                            recipe.health.precondition_failures += 1
+                        raise PreconditionFailedError(f"Precondition failed: {reason}")
                 except (ForbiddenAnchorError, PreconditionFailedError):
                     raise
                 except Exception:
@@ -1114,11 +1257,35 @@ class RecipeEngine:
                 expect = _substitute(step.expect, params)
                 timeout = min(max(int(step.timeout_ms), 1), 30000)
 
-                step_risk = classify_action_risk(step.action, target, value)
-                if step_risk in {RiskClass.R3_PERSISTENT_MUTATION, RiskClass.R4_IRREVERSIBLE}:
-                    persistent_mutation_started = True
+                step_explicit = getattr(step, "risk_class", None)
+                step_risk = classify_action_risk(step.action, target, value, explicit_risk=step_explicit)
 
-                self._execute_step(page, page_manager, step.action, target, value, expect, timeout)
+                # Individual step R4 authorization check
+                if step_risk == RiskClass.R4_IRREVERSIBLE and not allow_r4 and not getattr(safety, "allow_r4", False):
+                    raise RiskGateError(f"Step {index} ({step.action}) requires R4 (irreversible/destructive) actions. Execution blocked without explicit allow_r4=True.")
+
+                if step_risk in {RiskClass.R3_PERSISTENT_MUTATION, RiskClass.R4_IRREVERSIBLE}:
+                    # Gate 3: JIT Persistent-Write Barrier immediately before dispatching R3/R4
+                    if page_manager is not None:
+                        obs_jit = page_manager.observe(page)
+                        jit_match = match_page_state(recipe, page.url, obs_jit.tree)
+                        if not jit_match.get("matched", True):
+                            reason = jit_match.get("reason", "jit_barrier_failed")
+                            if "forbidden" in reason:
+                                if hasattr(recipe, "health"):
+                                    recipe.health.forbidden_anchor_failures += 1
+                                raise ForbiddenAnchorError(f"JIT Write Barrier aborted: Forbidden anchor detected immediately before {step_risk} action: {reason}")
+                            if hasattr(recipe, "health"):
+                                recipe.health.precondition_failures += 1
+                            raise PreconditionFailedError(f"JIT Write Barrier aborted: Precondition or similarity failed immediately before {step_risk} action: {reason}")
+
+                def mark_mutation_started():
+                    nonlocal persistent_mutation_started
+                    if step_risk in {RiskClass.R3_PERSISTENT_MUTATION, RiskClass.R4_IRREVERSIBLE}:
+                        persistent_mutation_started = True
+
+                self._execute_step(page, page_manager, step.action, target, value, expect, timeout, on_action_dispatched=mark_mutation_started)
+
 
             # Postcondition Phase
             if getattr(recipe, "postconditions", None) and page_manager is not None:
@@ -1143,21 +1310,29 @@ class RecipeEngine:
                 if policy == "reconcile" and getattr(recipe, "postconditions", None) and page_manager is not None:
                     try:
                         obs_recon = page_manager.observe(page)
-                        if all(_find_anchor_in_tree(post, obs_recon.tree) for post in recipe.postconditions):
-                            # Succeeded despite the error!
+                        if verify_transition_reconciliation(
+                            recipe.postconditions,
+                            baseline_nodes,
+                            obs_recon.tree,
+                            initial_url,
+                            obs_recon.page_url or page.url,
+                        ):
+                            # Succeeded despite the error via transition-aware verification!
                             reconciled = True
                             outcome = ExecutionOutcome.CONFIRMED_SUCCESS
                             if self.store:
                                 self.store.record_success(recipe)
                             return RecipeExecutionResult(
                                 True, recipe.id, index + 1, False,
-                                "Recipe recovered via postcondition reconciliation.",
+                                "Recipe recovered via transition-aware postcondition reconciliation.",
                                 None, outcome=outcome, risk_class=recipe_risk, reconciled=True,
-                                health_score=recipe.health.health_score if hasattr(recipe, "health") else 1.0
+                                health_score=recipe.health.health_score if hasattr(recipe, "health") else 1.0,
                             )
                     except Exception:
                         pass
                 outcome = ExecutionOutcome.UNKNOWN_SIDE_EFFECT
+                if hasattr(recipe, "health"):
+                    recipe.health.unknown_side_effects += 1
 
             if self.store:
                 self.store.record_failure(recipe, step_index=index, reason=reason, target=target)
@@ -1167,6 +1342,7 @@ class RecipeEngine:
                 failure, outcome=outcome, risk_class=recipe_risk, reconciled=reconciled,
                 health_score=recipe.health.health_score if hasattr(recipe, "health") else 1.0
             )
+
 
         recipe.metadata["last_failure_reason"] = None
         if self.store:
@@ -1189,8 +1365,10 @@ class RecipeEngine:
 
     @staticmethod
     def _execute_step(page: Page, manager: PageManager | None, action: str, target: Any, value: Any,
-                      expect: dict[str, Any], timeout: int) -> None:
+                      expect: dict[str, Any], timeout: int, on_action_dispatched: Any = None) -> None:
         if action == "eval":
+            if on_action_dispatched:
+                on_action_dispatched()
             page.evaluate(str(value))
             return
         if target is None:
@@ -1204,11 +1382,16 @@ class RecipeEngine:
                 native = {"click": "click", "fill": "fill", "select": "select"}.get(action)
                 if native is None:
                     raise ValueError(f"Unsupported ref action: {action}")
+                if on_action_dispatched:
+                    on_action_dispatched()
                 act(page, native, ref, None if value is None else str(value), {**expect, "timeout_ms": timeout}, manager=manager)
                 return
         initial_url = page.url
         locator = AnchorCompiler.resolve(page, target, mutating=action in {"click", "fill", "select", "upload"})
+        if on_action_dispatched:
+            on_action_dispatched()
         if action == "click":
+
             try:
                 locator.click(timeout=timeout)
             except Exception:
@@ -1457,10 +1640,6 @@ def suggest_for_url(
             argv = ["python3", "scripts/cdp_controller.py", "recipe", "run", str(r.id)]
             cmd = f"python3 scripts/cdp_controller.py recipe run {shlex.quote(str(r.id))}"
 
-        if risk_class == RiskClass.R4_IRREVERSIBLE:
-            argv.append("--allow-irreversible")
-            cmd += " --allow-irreversible"
-
         suggestions.append({
             "recipe_id": r.id,
             "name": r.name,
@@ -1468,6 +1647,7 @@ def suggest_for_url(
             "match_score": confidence,
             "risk_class": risk_class,
             "guard_status": guard_status,
+            "r4_authorization_required": (risk_class == RiskClass.R4_IRREVERSIBLE),
             "command": cmd,
             "argv": argv,
             "source": "curated",
@@ -1512,10 +1692,6 @@ def suggest_for_url(
                 argv = ["python3", "scripts/cdp_controller.py", "recipe", "run", str(cid)]
                 cmd = f"python3 scripts/cdp_controller.py recipe run {shlex.quote(str(cid))}"
 
-            if risk_class == RiskClass.R4_IRREVERSIBLE:
-                argv.append("--allow-irreversible")
-                cmd += " --allow-irreversible"
-
             suggestions.append({
                 "recipe_id": cid,
                 "name": c.get("name", cid),
@@ -1523,6 +1699,7 @@ def suggest_for_url(
                 "match_score": round(confidence, 2),
                 "risk_class": risk_class,
                 "guard_status": guard_status,
+                "r4_authorization_required": (risk_class == RiskClass.R4_IRREVERSIBLE),
                 "command": cmd,
                 "argv": argv,
                 "source": "learned",

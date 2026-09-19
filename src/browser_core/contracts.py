@@ -254,6 +254,7 @@ class MatcherSpec:
     required_anchors: list[dict[str, Any]] = field(default_factory=list)
     forbidden_anchors: list[dict[str, Any]] = field(default_factory=list)
     semantic_fingerprint: dict[str, Any] = field(default_factory=dict)
+    fingerprint_version: str = "semantic-fingerprint-v1"
     min_similarity: float = 0.70
 
     def to_dict(self) -> dict[str, Any]:
@@ -275,6 +276,9 @@ class HealthStats:
     executions: int = 0
     successes: int = 0
     failures: int = 0
+    precondition_failures: int = 0
+    forbidden_anchor_failures: int = 0
+    unknown_side_effects: int = 0
     health_score: float = 1.0
     semantic_similarity_ewma: float = 1.0
 
