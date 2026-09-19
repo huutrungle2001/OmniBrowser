@@ -350,3 +350,81 @@ class WorkflowExecutionResult:
 
 WorkflowSpec = WorkflowPlan
 WorkflowStep = TransitionEdge
+
+
+class RecipeLifecycleState(str):
+    DRAFT = "DRAFT"
+    VERIFIED_LOCAL = "VERIFIED_LOCAL"
+    VERIFIED_SHARED = "VERIFIED_SHARED"
+    CURATED = "CURATED"
+    SUSPECT = "SUSPECT"
+    QUARANTINED = "QUARANTINED"
+    ARCHIVED = "ARCHIVED"
+
+
+class QuarantinedRecipeError(OmniBrowserError, RuntimeError):
+    """Raised when an execution or suggestion request targets a quarantined recipe."""
+    exit_code = ExitCode.POLICY_BLOCKED
+
+
+class CASConflictError(OmniBrowserError, RuntimeError):
+    """Raised when an optimistic concurrency update fails due to a revision mismatch."""
+    exit_code = ExitCode.INTERNAL_ERROR
+
+
+@dataclass(slots=True)
+class PromotionPolicy:
+    min_successes_local: int = 2
+    min_successes_shared: int = 5
+    min_independent_sessions: int = 3
+    min_executions_curated: int = 20
+    min_independent_agents: int = 3
+    curated_success_rate: float = 0.95
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "PromotionPolicy":
+        if isinstance(data, cls):
+            return data
+        return cls(
+            min_successes_local=int(data.get("min_successes_local", 2)),
+            min_successes_shared=int(data.get("min_successes_shared", 5)),
+            min_independent_sessions=int(data.get("min_independent_sessions", 3)),
+            min_executions_curated=int(data.get("min_executions_curated", 20)),
+            min_independent_agents=int(data.get("min_independent_agents", 3)),
+            curated_success_rate=float(data.get("curated_success_rate", 0.95)),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class LifecycleRecord:
+    state: str = RecipeLifecycleState.DRAFT
+    revision: int = 1
+    generation: int = 1
+    sessions_seen: list[str] = field(default_factory=list)
+    agents_seen: list[str] = field(default_factory=list)
+    consecutive_failures: int = 0
+    quarantine_reason: str | None = None
+    quarantined_at: str | None = None
+    utility_score: float = 1.0
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "LifecycleRecord":
+        if isinstance(data, cls):
+            return data
+        return cls(
+            state=str(data.get("state", RecipeLifecycleState.DRAFT)),
+            revision=int(data.get("revision", 1)),
+            generation=int(data.get("generation", 1)),
+            sessions_seen=list(data.get("sessions_seen", [])),
+            agents_seen=list(data.get("agents_seen", [])),
+            consecutive_failures=int(data.get("consecutive_failures", 0)),
+            quarantine_reason=data.get("quarantine_reason"),
+            quarantined_at=data.get("quarantined_at"),
+            utility_score=float(data.get("utility_score", 1.0)),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)

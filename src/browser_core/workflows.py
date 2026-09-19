@@ -20,6 +20,7 @@ try:
         ExecutionOutcome,
         MatcherSpec,
         PreconditionFailedError,
+        RecipeLifecycleState,
         RiskClass,
         RiskGateError,
         SafetySpec,
@@ -49,6 +50,7 @@ except ImportError:
         ExecutionOutcome,
         MatcherSpec,
         PreconditionFailedError,
+        RecipeLifecycleState,
         RiskClass,
         RiskGateError,
         SafetySpec,
@@ -120,6 +122,13 @@ class StateTransitionGraph:
 
     def ingest_recipe(self, recipe: Recipe) -> None:
         """Ingest a Recipe into states and transition edges."""
+        if hasattr(recipe, "lifecycle") and recipe.lifecycle.state in {
+            RecipeLifecycleState.QUARANTINED,
+            RecipeLifecycleState.SUSPECT,
+            RecipeLifecycleState.ARCHIVED,
+        }:
+            return
+
         meta = getattr(recipe, "metadata", {}) or {}
         domain_val = recipe.domain_pattern if isinstance(recipe.domain_pattern, str) else (recipe.domain_pattern[0] if recipe.domain_pattern else "*")
         domain = _domain_from_url(domain_val)

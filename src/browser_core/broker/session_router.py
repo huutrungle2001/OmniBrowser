@@ -583,6 +583,7 @@ class SessionRouter:
             "--disable-background-networking",
             "--disable-background-timer-throttling",
             "--disable-renderer-backgrounding",
+            "--disable-gpu",
             "about:blank",
         ]
         process = subprocess.Popen(
@@ -648,6 +649,7 @@ class SessionRouter:
             f"--user-data-dir={temp_dir}",
             "--no-first-run",
             "--no-default-browser-check",
+            "--disable-gpu",
             "about:blank",
         ]
         if not requires_visual:

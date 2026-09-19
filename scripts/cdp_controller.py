@@ -547,7 +547,55 @@ def cmd_recipe_candidates(args):
 
 
 def cmd_recipe_promote(args):
-    _json(_learning_memory(args).promote(args.candidate_id, approve=args.approve))
+    recipe_id = getattr(args, "recipe_id", None) or getattr(args, "candidate_id", None)
+    store = _recipe_store(args)
+    recipe = store.get(recipe_id)
+    if recipe is not None:
+        target_state = getattr(args, "target_state", None)
+        promoted = store.promote(recipe_id, target_state=target_state)
+        _json(_recipe_value(promoted))
+        return 0
+
+    mem = _learning_memory(args)
+    try:
+        _json(mem.promote(recipe_id, approve=getattr(args, "approve", False)))
+        return 0
+    except Exception as err:
+        if recipe is None:
+            raise ValueError(f"Recipe not found: {recipe_id}") from err
+        raise
+
+
+def cmd_recipe_quarantine(args):
+    store = _recipe_store(args)
+    recipe = store.quarantine(args.recipe_id, reason=args.reason)
+    _json(_recipe_value(recipe))
+    return 0
+
+
+def cmd_recipe_restore(args):
+    store = _recipe_store(args)
+    recipe = store.restore(args.recipe_id)
+    _json(_recipe_value(recipe))
+    return 0
+
+
+def cmd_recipe_lifecycle(args):
+    store = _recipe_store(args)
+    recipe = store.get(args.recipe_id)
+    if recipe is None:
+        raise ValueError(f"Recipe not found: {args.recipe_id}")
+    lifecycle = getattr(recipe, "lifecycle", None)
+    lifecycle_dict = lifecycle.to_dict() if lifecycle and hasattr(lifecycle, "to_dict") else {}
+    health = getattr(recipe, "health", None)
+    health_dict = health.to_dict() if health and hasattr(health, "to_dict") else {}
+    _json({
+        "recipe_id": recipe.id,
+        "name": recipe.name,
+        "lifecycle": lifecycle_dict,
+        "health": health_dict,
+    })
+    return 0
 
 
 def cmd_recipe_suggest(args):
@@ -936,9 +984,22 @@ def _parser():
     p_run.add_argument("--memory-root", default=None, help="Learning memory root")
     p_candidates = recipe_sub.add_parser("candidates", help="List locally learned draft recipes")
     p_candidates.add_argument("--url", default=None); p_candidates.add_argument("--memory-root", default=None)
-    p_promote = recipe_sub.add_parser("promote", help="Promote a local learned draft after approval")
-    p_promote.add_argument("candidate_id"); p_promote.add_argument("--approve", action="store_true", default=False)
-    p_promote.add_argument("--memory-root", default=None)
+    p_promote = recipe_sub.add_parser("promote", help="Promote a recipe or local learned draft")
+    p_promote.add_argument("recipe_id", help="Recipe ID or candidate ID to promote")
+    p_promote.add_argument("--target-state", default=None, help="Target lifecycle state (e.g. VERIFIED_SHARED, CURATED)")
+    p_promote.add_argument("--approve", action="store_true", default=False, help="Approve learned draft promotion")
+    p_promote.add_argument("--recipes-dir", default=None, help="Recipe directory (defaults to ./recipes)")
+    p_promote.add_argument("--memory-root", default=None, help="Learning memory root")
+    p_quarantine = recipe_sub.add_parser("quarantine", help="Quarantine a recipe")
+    p_quarantine.add_argument("recipe_id", help="Recipe ID to quarantine")
+    p_quarantine.add_argument("--reason", default="administrative_quarantine", help="Reason for quarantine")
+    p_quarantine.add_argument("--recipes-dir", default=None, help="Recipe directory (defaults to ./recipes)")
+    p_restore = recipe_sub.add_parser("restore", help="Restore a quarantined recipe")
+    p_restore.add_argument("recipe_id", help="Recipe ID to restore")
+    p_restore.add_argument("--recipes-dir", default=None, help="Recipe directory (defaults to ./recipes)")
+    p_lifecycle = recipe_sub.add_parser("lifecycle", help="Show lifecycle and health status for a recipe")
+    p_lifecycle.add_argument("recipe_id", help="Recipe ID to inspect")
+    p_lifecycle.add_argument("--recipes-dir", default=None, help="Recipe directory (defaults to ./recipes)")
     p_suggest = recipe_sub.add_parser("suggest", help="Suggest learned recipes for a URL")
     p_suggest.add_argument("--url", default=None); p_suggest.add_argument("--memory-root", default=None)
 

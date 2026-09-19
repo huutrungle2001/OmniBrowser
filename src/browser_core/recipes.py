@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import hashlib
+import math
 import re
 import shlex
 import sqlite3
@@ -25,12 +26,17 @@ from uuid import uuid4
 from playwright.sync_api import Page
 
 from .contracts import (
+    CASConflictError,
     DOMNodeRef,
     ExecutionOutcome,
     ForbiddenAnchorError,
     HealthStats,
+    LifecycleRecord,
     MatcherSpec,
     PreconditionFailedError,
+    PromotionPolicy,
+    QuarantinedRecipeError,
+    RecipeLifecycleState,
     RiskClass,
     RiskGateError,
     SafetySpec,
@@ -537,6 +543,7 @@ class Recipe:
     postconditions: list[dict[str, Any]] = field(default_factory=list)
     safety: SafetySpec = field(default_factory=SafetySpec)
     health: HealthStats = field(default_factory=HealthStats)
+    lifecycle: LifecycleRecord = field(default_factory=LifecycleRecord)
 
     def __post_init__(self) -> None:
         self.metadata = _defaults(self.metadata)
@@ -553,6 +560,21 @@ class Recipe:
                 allow_r4=bool(self.safety.get("allow_r4", False)),
                 unknown_effect_policy=str(self.safety.get("unknown_effect_policy", "reconcile")),
             )
+        if isinstance(self.health, dict):
+            self.health = HealthStats(
+                executions=int(self.health.get("executions", 0)),
+                successes=int(self.health.get("successes", 0)),
+                failures=int(self.health.get("failures", 0)),
+                precondition_failures=int(self.health.get("precondition_failures", 0)),
+                forbidden_anchor_failures=int(self.health.get("forbidden_anchor_failures", 0)),
+                unknown_side_effects=int(self.health.get("unknown_side_effects", 0)),
+                health_score=float(self.health.get("health_score", 1.0)),
+                semantic_similarity_ewma=float(self.health.get("semantic_similarity_ewma", 1.0)),
+            )
+        if isinstance(self.lifecycle, dict):
+            self.lifecycle = LifecycleRecord.from_dict(self.lifecycle)
+        elif not isinstance(self.lifecycle, LifecycleRecord):
+            self.lifecycle = LifecycleRecord()
         self.steps = [step if isinstance(step, RecipeStep) else RecipeStep.from_dict(step) for step in self.steps]
         self.validate()
 
@@ -602,19 +624,38 @@ class Recipe:
                 executions=int(health_raw.get("executions", 0)),
                 successes=int(health_raw.get("successes", 0)),
                 failures=int(health_raw.get("failures", 0)),
+                precondition_failures=int(health_raw.get("precondition_failures", 0)),
+                forbidden_anchor_failures=int(health_raw.get("forbidden_anchor_failures", 0)),
+                unknown_side_effects=int(health_raw.get("unknown_side_effects", 0)),
                 health_score=float(health_raw.get("health_score", 1.0)),
                 semantic_similarity_ewma=float(health_raw.get("semantic_similarity_ewma", 1.0)),
             )
         else:
             health = HealthStats()
 
-        return cls(id=str(data["id"]), name=str(data["name"]),
-                   description=str(data.get("description", "")),
-                   domain_pattern=data["domain_pattern"], steps=list(data["steps"]),
-                   validation=dict(data.get("validation", {})), metadata=dict(data.get("metadata", {})),
-                   matcher=matcher, preconditions=list(data.get("preconditions", [])),
-                   postconditions=list(data.get("postconditions", [])),
-                   safety=safety, health=health)
+        lifecycle_raw = data.get("lifecycle") or {}
+        if isinstance(lifecycle_raw, LifecycleRecord):
+            lifecycle = lifecycle_raw
+        elif isinstance(lifecycle_raw, dict):
+            lifecycle = LifecycleRecord.from_dict(lifecycle_raw)
+        else:
+            lifecycle = LifecycleRecord()
+
+        return cls(
+            id=str(data["id"]),
+            name=str(data["name"]),
+            description=str(data.get("description", "")),
+            domain_pattern=data["domain_pattern"],
+            steps=list(data["steps"]),
+            validation=dict(data.get("validation", {})),
+            metadata=dict(data.get("metadata", {})),
+            matcher=matcher,
+            preconditions=list(data.get("preconditions", [])),
+            postconditions=list(data.get("postconditions", [])),
+            safety=safety,
+            health=health,
+            lifecycle=lifecycle,
+        )
 
     @classmethod
     def from_json(cls, payload: str | bytes | Path) -> "Recipe":
@@ -627,15 +668,24 @@ class Recipe:
 
     def to_dict(self) -> dict[str, Any]:
         kind = "omnibrowser.recipe_candidate" if (self.metadata.get("automatic") or self.metadata.get("status") == "draft") else "omnibrowser.recipe"
-        return {"kind": kind, "schema_version": 2, "id": self.id, "name": self.name, "description": self.description,
-                "domain_pattern": self.domain_pattern,
-                "steps": [step.to_dict() for step in self.steps],
-                "validation": self.validation, "metadata": self.metadata,
-                "matcher": self.matcher.to_dict(),
-                "preconditions": self.preconditions,
-                "postconditions": self.postconditions,
-                "safety": self.safety.to_dict(),
-                "health": self.health.to_dict()}
+        return {
+            "kind": kind,
+            "schema_version": 2,
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "domain_pattern": self.domain_pattern,
+            "steps": [step.to_dict() for step in self.steps],
+            "validation": self.validation,
+            "metadata": self.metadata,
+            "matcher": self.matcher.to_dict(),
+            "preconditions": self.preconditions,
+            "postconditions": self.postconditions,
+            "safety": self.safety.to_dict(),
+            "health": self.health.to_dict(),
+            "lifecycle": self.lifecycle.to_dict(),
+        }
+
 
     def to_json(self, *, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent) + "\n"
@@ -695,6 +745,151 @@ class Recipe:
         return False
 
 
+def calculate_utility_score(recipe: Recipe, now_ts: float | None = None) -> float:
+    """
+    Calculate multi-factor utility score U(R):
+    U(R) = (Frequency * Reliability * RecomputeCost * RecencyDecay) / StorageCost
+    """
+    if now_ts is None:
+        now_ts = time.time()
+
+    executions = getattr(recipe.health, "executions", 0) if hasattr(recipe, "health") else 0
+    health_score = getattr(recipe.health, "health_score", 1.0) if hasattr(recipe, "health") else 1.0
+
+    # Frequency: base 1.0 plus log-scaled executions
+    frequency = 1.0 + math.log1p(max(0, executions))
+
+    # Reliability: health score (success rate)
+    reliability = max(0.01, float(health_score))
+
+    # RecomputeCost: proportional to step complexity and risk
+    step_count = max(1, len(recipe.steps))
+    risk = getattr(recipe, "max_risk", get_recipe_risk(recipe))
+    risk_multiplier = {
+        RiskClass.R0_READONLY: 1.0,
+        RiskClass.R1_REVERSIBLE_NAV: 1.2,
+        RiskClass.R2_LOCAL_MUTABLE: 1.5,
+        RiskClass.R3_PERSISTENT_MUTATION: 2.0,
+        RiskClass.R4_IRREVERSIBLE: 3.0,
+    }.get(risk, 1.5)
+    recompute_cost = max(1.0, step_count * risk_multiplier)
+
+    # RecencyDecay: exponential decay based on last execution / update / creation
+    meta = getattr(recipe, "metadata", {}) or {}
+    last_ts = (
+        meta.get("last_executed_at")
+        or meta.get("updated_at")
+        or meta.get("created_at")
+        or now_ts
+    )
+    age_seconds = max(0.0, float(now_ts) - float(last_ts))
+    # 14-day half-life decay
+    recency_decay = math.exp(-age_seconds / (14.0 * 86400.0))
+
+    # StorageCost: payload size in KB (minimum 1.0 KB to normalize)
+    try:
+        payload_bytes = len(json.dumps(recipe.to_dict()).encode("utf-8"))
+        storage_cost = max(1.0, payload_bytes / 1024.0)
+    except Exception:
+        storage_cost = 1.0
+
+    raw_score = (frequency * reliability * recompute_cost * recency_decay) / storage_cost
+    return round(float(raw_score), 4)
+
+
+def evaluate_promotion(
+    recipe: Recipe,
+    policy: PromotionPolicy | None = None,
+) -> str | None:
+    """
+    Evaluate if a recipe meets evidence criteria for advancing to a higher lifecycle state.
+    Returns the new state if promotion criteria are met, or None if not eligible.
+    """
+    if policy is None:
+        policy = PromotionPolicy()
+
+    current_state = getattr(recipe.lifecycle, "state", RecipeLifecycleState.DRAFT) if hasattr(recipe, "lifecycle") else RecipeLifecycleState.DRAFT
+    if current_state in {RecipeLifecycleState.QUARANTINED, RecipeLifecycleState.ARCHIVED, RecipeLifecycleState.SUSPECT}:
+        return None
+
+    executions = getattr(recipe.health, "executions", 0) if hasattr(recipe, "health") else 0
+    successes = getattr(recipe.health, "successes", 0) if hasattr(recipe, "health") else int(recipe.metadata.get("success_count", 0))
+    failures = getattr(recipe.health, "failures", 0) if hasattr(recipe, "health") else int(recipe.metadata.get("failure_count", 0))
+    health_score = getattr(recipe.health, "health_score", 1.0) if hasattr(recipe, "health") else 1.0
+
+    sessions_seen = set(getattr(recipe.lifecycle, "sessions_seen", [])) if hasattr(recipe, "lifecycle") else set()
+    agents_seen = set(getattr(recipe.lifecycle, "agents_seen", [])) if hasattr(recipe, "lifecycle") else set()
+
+    qualifying_state = current_state
+
+    # DRAFT -> VERIFIED_LOCAL: >= 2 successful replays
+    if successes >= policy.min_successes_local:
+        qualifying_state = RecipeLifecycleState.VERIFIED_LOCAL
+
+    # VERIFIED_LOCAL -> VERIFIED_SHARED: >= 5 successes across >= 3 independent sessions with 0 structural failures
+    if (
+        qualifying_state in {RecipeLifecycleState.VERIFIED_LOCAL, RecipeLifecycleState.VERIFIED_SHARED, RecipeLifecycleState.CURATED}
+        and successes >= policy.min_successes_shared
+        and len(sessions_seen) >= policy.min_independent_sessions
+        and failures == 0
+    ):
+        qualifying_state = RecipeLifecycleState.VERIFIED_SHARED
+
+    # VERIFIED_SHARED -> CURATED: >= 20 executions across >= 3 distinct agents with success rate >= 0.95
+    if (
+        qualifying_state in {RecipeLifecycleState.VERIFIED_SHARED, RecipeLifecycleState.CURATED}
+        and executions >= policy.min_executions_curated
+        and len(agents_seen) >= policy.min_independent_agents
+        and health_score >= policy.curated_success_rate
+    ):
+        qualifying_state = RecipeLifecycleState.CURATED
+
+    state_ranks = {
+        RecipeLifecycleState.DRAFT: 0,
+        RecipeLifecycleState.VERIFIED_LOCAL: 1,
+        RecipeLifecycleState.VERIFIED_SHARED: 2,
+        RecipeLifecycleState.CURATED: 3,
+    }
+    current_rank = state_ranks.get(current_state, -1)
+    qualifying_rank = state_ranks.get(qualifying_state, -1)
+
+    if qualifying_rank > current_rank:
+        return qualifying_state
+    return None
+
+
+def check_quarantine_triggers(
+    recipe: Recipe,
+    last_outcome: str | None = None,
+) -> tuple[bool, str | None]:
+    """
+    Check automatic degradation and quarantine triggers:
+    1. >= 3 consecutive execution failures
+    2. Any single UNKNOWN_SIDE_EFFECT on persistent mutation (R3/R4)
+    3. Health score degradation below 0.60
+    """
+    lifecycle = getattr(recipe, "lifecycle", None)
+    consecutive_failures = getattr(lifecycle, "consecutive_failures", 0) if lifecycle else 0
+
+    # Trigger 1: >= 3 consecutive failures
+    if consecutive_failures >= 3:
+        return True, f"consecutive_failures_exceeded: {consecutive_failures} >= 3"
+
+    # Trigger 2: UNKNOWN_SIDE_EFFECT on persistent mutation (R3/R4)
+    if last_outcome == ExecutionOutcome.UNKNOWN_SIDE_EFFECT:
+        recipe_risk = getattr(recipe, "max_risk", get_recipe_risk(recipe))
+        if recipe_risk in {RiskClass.R3_PERSISTENT_MUTATION, RiskClass.R4_IRREVERSIBLE}:
+            return True, f"unknown_side_effect_on_persistent_mutation: risk={recipe_risk}"
+
+    # Trigger 3: Health score degradation below threshold (< 0.60)
+    health = getattr(recipe, "health", None)
+    if health and health.health_score < 0.60:
+        if health.executions >= 3 or (health.executions == 0 and health.health_score != 1.0):
+            return True, f"health_score_degraded: {health.health_score} < 0.60"
+
+    return False, None
+
+
 class RecipeStore:
     """Loads recipes from a directory and records only non-sensitive health data."""
 
@@ -741,22 +936,143 @@ class RecipeStore:
 
     find_matching = match
 
-    def save(self, recipe: Recipe, domain: str | None = None) -> Path:
-        target_domain = domain
-        if not target_domain:
-            if isinstance(recipe.domain_pattern, str) and "*" not in recipe.domain_pattern and "/" not in recipe.domain_pattern and ":" not in recipe.domain_pattern:
-                target_domain = recipe.domain_pattern
-            elif isinstance(recipe.domain_pattern, list) and len(recipe.domain_pattern) == 1 and "*" not in recipe.domain_pattern[0]:
-                target_domain = recipe.domain_pattern[0]
-        if target_domain:
-            save_dir = self.root / target_domain
+    def save(
+        self,
+        recipe: Recipe,
+        domain: str | None = None,
+        expected_revision: int | None = None,
+    ) -> Path:
+        target_path = None
+        if self.root.exists():
+            for p in self.root.rglob(f"{recipe.id}.json"):
+                if p.is_file() and "sitemaps" not in p.parts:
+                    target_path = p
+                    break
+
+        if target_path is not None:
+            path = target_path
         else:
-            save_dir = self.root
-        save_dir.mkdir(parents=True, exist_ok=True)
-        path = save_dir / f"{recipe.id}.json"
+            target_domain = domain
+            if not target_domain:
+                if isinstance(recipe.domain_pattern, str) and "*" not in recipe.domain_pattern and "/" not in recipe.domain_pattern and ":" not in recipe.domain_pattern:
+                    target_domain = recipe.domain_pattern
+                elif isinstance(recipe.domain_pattern, list) and len(recipe.domain_pattern) == 1 and "*" not in recipe.domain_pattern[0]:
+                    target_domain = recipe.domain_pattern[0]
+            if target_domain:
+                save_dir = self.root / target_domain
+            else:
+                save_dir = self.root
+            save_dir.mkdir(parents=True, exist_ok=True)
+            path = save_dir / f"{recipe.id}.json"
+
+        # Optimistic Concurrency Control (CAS check)
+        if expected_revision is not None:
+            disk_rev = None
+            if path.exists():
+                try:
+                    existing_data = json.loads(path.read_text(encoding="utf-8"))
+                    existing_lc = existing_data.get("lifecycle", {})
+                    disk_rev = int(existing_lc.get("revision", 1))
+                except Exception:
+                    disk_rev = None
+            elif recipe.id in self._recipes:
+                existing_rec = self._recipes[recipe.id]
+                disk_rev = getattr(existing_rec.lifecycle, "revision", 1) if hasattr(existing_rec, "lifecycle") else 1
+
+            if disk_rev is not None and disk_rev != expected_revision:
+                raise CASConflictError(
+                    f"CAS conflict saving recipe '{recipe.id}': expected revision {expected_revision}, but found revision {disk_rev} on disk"
+                )
+
+        if hasattr(recipe, "lifecycle"):
+            recipe.lifecycle.revision += 1
+            recipe.lifecycle.utility_score = calculate_utility_score(recipe)
+
         path.write_text(recipe.to_json(), encoding="utf-8")
         self._recipes[recipe.id] = recipe
         return path
+
+    def quarantine(self, recipe_id: str, reason: str = "administrative_quarantine") -> Recipe:
+        recipe = self.get(recipe_id)
+        if recipe is None:
+            raise ValueError(f"Recipe not found: {recipe_id}")
+        if hasattr(recipe, "lifecycle"):
+            recipe.lifecycle.state = RecipeLifecycleState.QUARANTINED
+            recipe.lifecycle.quarantine_reason = str(reason)
+            recipe.lifecycle.quarantined_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        self.save(recipe)
+        return recipe
+
+    def restore(self, recipe_id: str) -> Recipe:
+        recipe = self.get(recipe_id)
+        if recipe is None:
+            raise ValueError(f"Recipe not found: {recipe_id}")
+        if hasattr(recipe, "lifecycle"):
+            recipe.lifecycle.state = RecipeLifecycleState.VERIFIED_LOCAL
+            recipe.lifecycle.consecutive_failures = 0
+            recipe.lifecycle.quarantine_reason = None
+            recipe.lifecycle.quarantined_at = None
+        self.save(recipe)
+        return recipe
+
+    def promote(
+        self,
+        recipe_id: str,
+        target_state: str | None = None,
+        policy: PromotionPolicy | None = None,
+    ) -> Recipe:
+        recipe = self.get(recipe_id)
+        if recipe is None:
+            raise ValueError(f"Recipe not found: {recipe_id}")
+        if target_state is not None:
+            clean_state = str(target_state).strip().upper()
+            valid_states = {
+                RecipeLifecycleState.DRAFT,
+                RecipeLifecycleState.VERIFIED_LOCAL,
+                RecipeLifecycleState.VERIFIED_SHARED,
+                RecipeLifecycleState.CURATED,
+                RecipeLifecycleState.SUSPECT,
+                RecipeLifecycleState.QUARANTINED,
+                RecipeLifecycleState.ARCHIVED,
+            }
+            if clean_state not in valid_states:
+                raise ValueError(f"Invalid target lifecycle state: {target_state}")
+            recipe.lifecycle.state = clean_state
+        else:
+            next_state = evaluate_promotion(recipe, policy=policy)
+            if not next_state:
+                raise ValueError(
+                    f"Recipe '{recipe_id}' does not satisfy promotion criteria from state '{recipe.lifecycle.state}'"
+                )
+            recipe.lifecycle.state = next_state
+        self.save(recipe)
+        return recipe
+
+    def evict_low_utility(self, threshold: float = 0.5, archive: bool = True) -> list[str]:
+        evicted = []
+        for recipe in list(self.all()):
+            u_score = calculate_utility_score(recipe)
+            if hasattr(recipe, "lifecycle"):
+                recipe.lifecycle.utility_score = u_score
+            if u_score < threshold:
+                if archive:
+                    if hasattr(recipe, "lifecycle"):
+                        recipe.lifecycle.state = RecipeLifecycleState.ARCHIVED
+                    self.save(recipe)
+                else:
+                    self.delete(recipe.id)
+                evicted.append(recipe.id)
+        return evicted
+
+    def delete(self, recipe_id: str) -> bool:
+        self._recipes.pop(recipe_id, None)
+        deleted = False
+        if self.root.exists():
+            for p in self.root.rglob(f"{recipe_id}.json"):
+                if p.is_file():
+                    p.unlink()
+                    deleted = True
+        return deleted
 
     def save_sitemap(self, url: str, observed_nodes: list[Any]) -> Path:
         domain = _domain_from_url(url)
@@ -807,15 +1123,42 @@ class RecipeStore:
                 return None
         return None
 
-    def record_success(self, recipe: Recipe) -> None:
+    def record_success(
+        self,
+        recipe: Recipe,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> None:
         recipe.metadata["success_count"] = int(recipe.metadata.get("success_count", 0)) + 1
         recipe.metadata["last_failure_reason"] = None
+        recipe.metadata["last_executed_at"] = time.time()
         if hasattr(recipe, "health"):
             recipe.health.executions += 1
             recipe.health.successes += 1
             recipe.health.health_score = round(recipe.health.successes / recipe.health.executions, 3)
 
-    def record_failure(self, recipe: Recipe, *, step_index: int, reason: str, target: str | None) -> None:
+        if hasattr(recipe, "lifecycle"):
+            recipe.lifecycle.consecutive_failures = 0
+            if session_id and session_id not in recipe.lifecycle.sessions_seen:
+                recipe.lifecycle.sessions_seen.append(session_id)
+            if agent_id and agent_id not in recipe.lifecycle.agents_seen:
+                recipe.lifecycle.agents_seen.append(agent_id)
+
+            promoted = evaluate_promotion(recipe)
+            if promoted:
+                recipe.lifecycle.state = promoted
+
+            recipe.lifecycle.utility_score = calculate_utility_score(recipe)
+
+    def record_failure(
+        self,
+        recipe: Recipe,
+        *,
+        step_index: int,
+        reason: str,
+        target: str | None,
+        outcome: str | None = None,
+    ) -> None:
         if "RiskGateError" in str(reason) or "allow_r4" in str(reason):
             return
         ledger = recipe.metadata.setdefault("failure_ledger", [])
@@ -824,10 +1167,20 @@ class RecipeStore:
         recipe.metadata["failure_ledger"] = ledger[-20:]
         recipe.metadata["failure_count"] = int(recipe.metadata.get("failure_count", 0)) + 1
         recipe.metadata["last_failure_reason"] = entry["reason"]
+        recipe.metadata["last_executed_at"] = time.time()
         if hasattr(recipe, "health"):
             recipe.health.executions += 1
             recipe.health.failures += 1
             recipe.health.health_score = round(recipe.health.successes / recipe.health.executions, 3)
+
+        if hasattr(recipe, "lifecycle"):
+            recipe.lifecycle.consecutive_failures += 1
+            triggered, q_reason = check_quarantine_triggers(recipe, last_outcome=outcome)
+            if triggered:
+                recipe.lifecycle.state = RecipeLifecycleState.QUARANTINED
+                recipe.lifecycle.quarantine_reason = q_reason
+                recipe.lifecycle.quarantined_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            recipe.lifecycle.utility_score = calculate_utility_score(recipe)
 
 
 
@@ -1212,8 +1565,17 @@ class RecipeEngine:
     def __init__(self, store: RecipeStore | None = None):
         self.store = store
 
-    def execute(self, recipe: Recipe | str, page: Page, params: Mapping[str, Any] | None = None,
-                *, manager: PageManager | None = None, allow_r4: bool = False) -> RecipeExecutionResult:
+    def execute(
+        self,
+        recipe: Recipe | str,
+        page: Page,
+        params: Mapping[str, Any] | None = None,
+        *,
+        manager: PageManager | None = None,
+        allow_r4: bool = False,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> RecipeExecutionResult:
         if isinstance(recipe, str):
             if self.store is None:
                 raise ValueError("RecipeStore is required when recipe is an id")
@@ -1221,6 +1583,11 @@ class RecipeEngine:
             if found is None:
                 raise KeyError(f"Unknown recipe: {recipe}")
             recipe = found
+
+        if hasattr(recipe, "lifecycle") and recipe.lifecycle.state == RecipeLifecycleState.QUARANTINED:
+            q_reason = getattr(recipe.lifecycle, "quarantine_reason", "quarantined")
+            raise QuarantinedRecipeError(f"Cannot execute recipe '{recipe.id}': Recipe is QUARANTINED ({q_reason})")
+
         params = params or {}
         page_manager = manager or (self.store and getattr(self.store, "manager", None)) or manager_for_page(page)
 
@@ -1310,7 +1677,7 @@ class RecipeEngine:
             resolved_validation = _substitute(recipe.validation, params)
             self._validate(resolved_validation, page, page_manager)
 
-        except (ForbiddenAnchorError, PreconditionFailedError, RiskGateError):
+        except (ForbiddenAnchorError, PreconditionFailedError, RiskGateError, QuarantinedRecipeError):
             raise
         except Exception as error:
             reason = _safe_reason(str(error))
@@ -1334,7 +1701,25 @@ class RecipeEngine:
                             reconciled = True
                             outcome = ExecutionOutcome.CONFIRMED_SUCCESS
                             if self.store:
-                                self.store.record_success(recipe)
+                                self.store.record_success(recipe, session_id=session_id, agent_id=agent_id)
+                            else:
+                                recipe.metadata["success_count"] = int(recipe.metadata.get("success_count", 0)) + 1
+                                recipe.metadata["last_failure_reason"] = None
+                                recipe.metadata["last_executed_at"] = time.time()
+                                if hasattr(recipe, "health"):
+                                    recipe.health.executions += 1
+                                    recipe.health.successes += 1
+                                    recipe.health.health_score = round(recipe.health.successes / recipe.health.executions, 3)
+                                if hasattr(recipe, "lifecycle"):
+                                    recipe.lifecycle.consecutive_failures = 0
+                                    if session_id and session_id not in recipe.lifecycle.sessions_seen:
+                                        recipe.lifecycle.sessions_seen.append(session_id)
+                                    if agent_id and agent_id not in recipe.lifecycle.agents_seen:
+                                        recipe.lifecycle.agents_seen.append(agent_id)
+                                    promoted = evaluate_promotion(recipe)
+                                    if promoted:
+                                        recipe.lifecycle.state = promoted
+                                    recipe.lifecycle.utility_score = calculate_utility_score(recipe)
                             return RecipeExecutionResult(
                                 True, recipe.id, index + 1, False,
                                 "Recipe recovered via transition-aware postcondition reconciliation.",
@@ -1348,7 +1733,16 @@ class RecipeEngine:
                     recipe.health.unknown_side_effects += 1
 
             if self.store:
-                self.store.record_failure(recipe, step_index=index, reason=reason, target=target)
+                self.store.record_failure(recipe, step_index=index, reason=reason, target=target, outcome=outcome)
+            else:
+                if hasattr(recipe, "lifecycle"):
+                    recipe.lifecycle.consecutive_failures += 1
+                    triggered, q_reason = check_quarantine_triggers(recipe, last_outcome=outcome)
+                    if triggered:
+                        recipe.lifecycle.state = RecipeLifecycleState.QUARANTINED
+                        recipe.lifecycle.quarantine_reason = q_reason
+                        recipe.lifecycle.quarantined_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    recipe.lifecycle.utility_score = calculate_utility_score(recipe)
             return RecipeExecutionResult(
                 False, recipe.id, index, True,
                 f"Recipe fast path failed; fallback to Level 1 observe() / act() and re-scan the page. Reason: {reason}",
@@ -1359,13 +1753,24 @@ class RecipeEngine:
 
         recipe.metadata["last_failure_reason"] = None
         if self.store:
-            self.store.record_success(recipe)
+            self.store.record_success(recipe, session_id=session_id, agent_id=agent_id)
         else:
             recipe.metadata["success_count"] = int(recipe.metadata.get("success_count", 0)) + 1
+            recipe.metadata["last_executed_at"] = time.time()
             if hasattr(recipe, "health"):
                 recipe.health.executions += 1
                 recipe.health.successes += 1
                 recipe.health.health_score = round(recipe.health.successes / recipe.health.executions, 3)
+            if hasattr(recipe, "lifecycle"):
+                recipe.lifecycle.consecutive_failures = 0
+                if session_id and session_id not in recipe.lifecycle.sessions_seen:
+                    recipe.lifecycle.sessions_seen.append(session_id)
+                if agent_id and agent_id not in recipe.lifecycle.agents_seen:
+                    recipe.lifecycle.agents_seen.append(agent_id)
+                promoted = evaluate_promotion(recipe)
+                if promoted:
+                    recipe.lifecycle.state = promoted
+                recipe.lifecycle.utility_score = calculate_utility_score(recipe)
 
         return RecipeExecutionResult(
             True, recipe.id, len(recipe.steps), False,
@@ -1623,6 +2028,11 @@ def suggest_for_url(
     for r in matching_curated:
         if r.id in seen_ids:
             continue
+        if hasattr(r, "lifecycle") and r.lifecycle.state in {
+            RecipeLifecycleState.QUARANTINED,
+            RecipeLifecycleState.ARCHIVED,
+        }:
+            continue
         risk_class = get_recipe_risk(r)
         match_res = match_page_state(r, url, tree) if tree is not None else {"matched": True, "score": 0.95}
         if tree is not None and not match_res.get("matched", False):
@@ -1665,6 +2075,7 @@ def suggest_for_url(
             "argv": argv,
             "source": "curated",
             "required_params": params,
+            "lifecycle_state": getattr(getattr(r, "lifecycle", None), "state", RecipeLifecycleState.DRAFT),
         })
         seen_ids.add(r.id)
 
@@ -1675,6 +2086,10 @@ def suggest_for_url(
         for c in candidates:
             cid = c.get("id")
             if not cid or cid in seen_ids:
+                continue
+            lc = c.get("lifecycle", {})
+            c_state = lc.get("state", RecipeLifecycleState.DRAFT) if isinstance(lc, dict) else getattr(lc, "state", RecipeLifecycleState.DRAFT)
+            if c_state in {RecipeLifecycleState.QUARANTINED, RecipeLifecycleState.ARCHIVED}:
                 continue
             meta = c.get("metadata", {})
             risk_class = get_recipe_risk(c)
@@ -1717,6 +2132,7 @@ def suggest_for_url(
                 "argv": argv,
                 "source": "learned",
                 "required_params": params,
+                "lifecycle_state": c_state,
             })
             seen_ids.add(cid)
     except Exception:
