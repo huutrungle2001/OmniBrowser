@@ -11,7 +11,7 @@ When an AI agent boots up or re-reads this file, it must deterministically resol
 1. **Check Tmux Session Name**: Run `tmux display-message -p '#S' 2>/dev/null` or inspect `$TMUX_PANE`:
    - If session matches `omni-oracle` (or you are interacting directly with the USER / running Antigravity CLI `agym`):
      👉 **YOU ARE THE PROJECT ORACLE (`omni-oracle`)**.
-     - **Mission**: Direct dialog with user, requirement shaping, external ChatGPT Web consultations via `python3 scripts/chatgpt_client.py chat ...`, and authoring frozen task specs (`.agents/communication/tasks/<task-id>.md`).
+     - **Mission**: Direct dialog with user, requirement shaping, external ChatGPT Web consultations via `./scripts/oracle session ask <session_name> "..."`, and authoring frozen task specs (`.agents/communication/tasks/<task-id>.md`).
      - **Constraint**: Do NOT write bulk implementation code. Notify Hive via `scripts/notify_agent.sh -a hive` and **yield turn immediately**.
    - If session matches `omni-hive` (or you are Terra / running OpenAI Codex CLI `codex`):
      👉 **YOU ARE THE PROJECT HIVE MIND (`omni-hive`)**.
@@ -155,7 +155,7 @@ OmniBrowser operates under the standardized **Two-Session Model** managed via Tm
 
 1. **`omni-oracle` (Project Oracle — Agym)**:
    - Direct conversational and brainstorming partner for the USER.
-   - Consults external ChatGPT Web oracle via `chatgpt_client.py` for advanced algorithmic questions without local token bloat.
+   - Consults external ChatGPT Web oracle via `scripts/oracle` for advanced algorithmic questions without local token bloat.
    - Authors frozen formal task specifications (`.agents/communication/tasks/<task-id>.md`) and handoffs via `scripts/notify_agent.sh -a hive`.
 2. **`omni-hive` (Lead Hive Mind — Terra & Gemini Swarm)**:
    - Runs `cx/gpt-5.6-terra` as Supervisory Hive Mind & Quality Gatekeeper.

@@ -87,7 +87,7 @@ class LifecycleWatchdog:
                     record.drain_reason = f"Exceeded crash threshold ({record.crashed_targets_count} crashes)"
 
     def check_memory_and_drain(self, daemon_id: str, get_rss_fn: Callable[[int], int] | None = None) -> bool:
-        """Checks if daemon RSS exceeds threshold; if so, sets to DRAINING. Returns True if draining."""
+        """Checks if daemon process tree RSS exceeds threshold; if so, sets to DRAINING."""
         with self._lock:
             record = self._daemons.get(daemon_id)
             if not record or record.state in (DaemonState.DRAINING, DaemonState.RECYCLED):
@@ -96,7 +96,7 @@ class LifecycleWatchdog:
             rss_mb = self._get_pid_rss_mb(record.pid) if get_rss_fn is None else get_rss_fn(record.pid)
             if rss_mb > record.max_rss_mb:
                 record.state = DaemonState.DRAINING
-                record.drain_reason = f"RSS memory {rss_mb}MB exceeded limit {record.max_rss_mb}MB"
+                record.drain_reason = f"Process-tree RSS memory {rss_mb}MB exceeded limit {record.max_rss_mb}MB"
                 return True
             return False
 
@@ -118,10 +118,17 @@ class LifecycleWatchdog:
             return False
 
     def _get_pid_rss_mb(self, pid: int) -> int:
+        """Calculates total RSS memory for parent process and all its children (renderers, GPU, network)."""
         try:
             import psutil
-            process = psutil.Process(pid)
-            return int(process.memory_info().rss / (1024 * 1024))
+            parent = psutil.Process(pid)
+            total_rss = parent.memory_info().rss
+            for child in parent.children(recursive=True):
+                try:
+                    total_rss += child.memory_info().rss
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            return int(total_rss / (1024 * 1024))
         except Exception:
             return 0
 

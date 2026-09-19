@@ -73,9 +73,9 @@ class AdmissionController:
                         if len(parts) > 1:
                             page_size = int(parts[1].split("bytes")[0].strip())
                 free_mb = int((pages_free + pages_speculative) * page_size / (1024 * 1024))
-                return max(free_mb, 2048)  # Generous lower bound fallback
+                return max(0, free_mb)
             except Exception:
-                return 4096
+                return 1024
 
         # Linux fallback using /proc/meminfo
         if sys.platform.startswith("linux"):
@@ -87,7 +87,7 @@ class AdmissionController:
             except Exception:
                 pass
 
-        return 4096
+        return 1024
 
     def check_admission(
         self,

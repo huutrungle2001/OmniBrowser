@@ -44,6 +44,15 @@ class TargetRegistry:
         title: str = "",
     ) -> TargetRecord:
         with self._lock:
+            # Clean up old reverse mapping if re-registering target under a different lease
+            old_record = self._targets.get(target_id)
+            if old_record and old_record.lease_id != lease_id:
+                old_set = self._lease_targets.get(old_record.lease_id)
+                if old_set:
+                    old_set.discard(target_id)
+                    if not old_set:
+                        del self._lease_targets[old_record.lease_id]
+
             record = TargetRecord(
                 target_id=target_id,
                 browser_context_id=browser_context_id,

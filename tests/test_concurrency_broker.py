@@ -153,7 +153,7 @@ def test_lease_manager_lifecycle_and_fencing():
     # Stale fencing token check
     with pytest.raises(LeaseExpiredError) as exc_info:
         manager.validate_lease(lease.lease_id, fencing_token=0)
-    assert "Stale fencing token" in str(exc_info.value)
+    assert "Invalid fencing token" in str(exc_info.value)
 
     # Renewal increments fencing token
     old_expires_at = lease.expires_at
@@ -202,7 +202,7 @@ def test_lease_manager_identity_concurrency_lock():
             auth_identity="user@gmail.com",
             exclusive_identity=True,
         )
-    assert "currently locked exclusively" in str(exc_info.value)
+    assert "currently locked by lease" in str(exc_info.value)
 
     # Releasing lease 1 unlocks identity
     manager.revoke_lease(lease1.lease_id)
@@ -353,3 +353,246 @@ def test_cli_broker_and_scoped_tabs(capsys, monkeypatch, temp_broker_dir):
     assert rc == 5
     captured = capsys.readouterr()
     assert "is no longer active" in captured.err
+
+
+def test_exact_fencing_token_validation():
+    """Verifies that both stale (<) and fabricated future (>) fencing tokens are strictly rejected."""
+    manager = LeaseManager()
+    lease = manager.create_lease(
+        agent_id="agent-fencing",
+        project_id="test-fencing",
+        execution_class=ExecutionClass.CLASS_S,
+        cdp_url="http://127.0.0.1:9999",
+    )
+    current_token = lease.fencing_token
+
+    # 1. Exact match passes
+    assert manager.validate_lease(lease.lease_id, fencing_token=current_token).lease_id == lease.lease_id
+
+    # 2. Stale token rejected (< current_token)
+    with pytest.raises(LeaseExpiredError) as exc_stale:
+        manager.validate_lease(lease.lease_id, fencing_token=current_token - 1)
+    assert f"Invalid fencing token #{current_token - 1} (expected: #{current_token})" in str(exc_stale.value)
+
+    # 3. Fabricated future token rejected (> current_token)
+    with pytest.raises(LeaseExpiredError) as exc_future:
+        manager.validate_lease(lease.lease_id, fencing_token=current_token + 99)
+    assert f"Invalid fencing token #{current_token + 99} (expected: #{current_token})" in str(exc_future.value)
+
+    # 4. After renewal, old token rejected, new token accepted
+    renewed = manager.renew_lease(lease.lease_id)
+    assert renewed.fencing_token > current_token
+    with pytest.raises(LeaseExpiredError):
+        manager.validate_lease(lease.lease_id, fencing_token=current_token)
+    assert manager.validate_lease(lease.lease_id, fencing_token=renewed.fencing_token).lease_id == lease.lease_id
+
+
+def test_shared_and_exclusive_identity_locks():
+    """Verifies that multiple shared leases coexist, exclusive is blocked until all shared release, and vice versa."""
+    manager = LeaseManager()
+
+    # 1. First shared lease succeeds
+    l_sh1 = manager.create_lease(
+        agent_id="agent-1",
+        project_id="test",
+        execution_class=ExecutionClass.CLASS_A,
+        cdp_url="http://127.0.0.1:9999",
+        auth_identity="alice@example.com",
+        exclusive_identity=False,
+    )
+    assert manager.is_identity_locked("alice@example.com") is True
+
+    # 2. Second shared lease also succeeds
+    l_sh2 = manager.create_lease(
+        agent_id="agent-2",
+        project_id="test",
+        execution_class=ExecutionClass.CLASS_A,
+        cdp_url="http://127.0.0.1:9999",
+        auth_identity="alice@example.com",
+        exclusive_identity=False,
+    )
+
+    # 3. Exclusive lease request is rejected while shared leases are active
+    with pytest.raises(IdentityConflictError) as exc_info:
+        manager.create_lease(
+            agent_id="agent-3",
+            project_id="test",
+            execution_class=ExecutionClass.CLASS_A,
+            cdp_url="http://127.0.0.1:9999",
+            auth_identity="alice@example.com",
+            exclusive_identity=True,
+        )
+    assert "currently locked by lease" in str(exc_info.value)
+
+    # 4. Releasing l_sh1 still leaves identity locked by l_sh2
+    manager.revoke_lease(l_sh1.lease_id)
+    assert manager.is_identity_locked("alice@example.com") is True
+
+    # 5. Exclusive request still rejected
+    with pytest.raises(IdentityConflictError):
+        manager.create_lease(
+            agent_id="agent-3",
+            project_id="test",
+            execution_class=ExecutionClass.CLASS_A,
+            cdp_url="http://127.0.0.1:9999",
+            auth_identity="alice@example.com",
+            exclusive_identity=True,
+        )
+
+    # 6. Releasing l_sh2 unlocks the identity
+    manager.revoke_lease(l_sh2.lease_id)
+    assert manager.is_identity_locked("alice@example.com") is False
+
+    # 7. Exclusive lease now succeeds
+    l_ex = manager.create_lease(
+        agent_id="agent-3",
+        project_id="test",
+        execution_class=ExecutionClass.CLASS_A,
+        cdp_url="http://127.0.0.1:9999",
+        auth_identity="alice@example.com",
+        exclusive_identity=True,
+    )
+    assert manager.is_identity_locked("alice@example.com") is True
+
+    # 8. Both shared and exclusive requests are rejected while exclusive is active
+    with pytest.raises(IdentityConflictError):
+        manager.create_lease(
+            agent_id="agent-4",
+            project_id="test",
+            execution_class=ExecutionClass.CLASS_A,
+            cdp_url="http://127.0.0.1:9999",
+            auth_identity="alice@example.com",
+            exclusive_identity=False,
+        )
+
+    with pytest.raises(IdentityConflictError):
+        manager.create_lease(
+            agent_id="agent-5",
+            project_id="test",
+            execution_class=ExecutionClass.CLASS_A,
+            cdp_url="http://127.0.0.1:9999",
+            auth_identity="alice@example.com",
+            exclusive_identity=True,
+        )
+
+    # 9. Clean release
+    manager.revoke_lease(l_ex.lease_id)
+    assert manager.is_identity_locked("alice@example.com") is False
+
+
+def test_reserve_before_provision_rollback():
+    """Verifies that identity pre-reservation rolls back cleanly on provisioning failure."""
+    manager = LeaseManager()
+    temp_lease_id = "temp-lease-fail"
+
+    # Pre-reserve
+    manager.reserve_identity("bob@example.com", exclusive=True, temp_lease_id=temp_lease_id)
+    assert manager.is_identity_locked("bob@example.com") is True
+
+    # Another lease attempt fails
+    with pytest.raises(IdentityConflictError):
+        manager.reserve_identity("bob@example.com", exclusive=True, temp_lease_id="temp-lease-2")
+
+    # Simulate provisioning failure -> rollback
+    manager.rollback_identity("bob@example.com", temp_lease_id)
+    assert manager.is_identity_locked("bob@example.com") is False
+
+    # Now another lease can reserve cleanly
+    manager.reserve_identity("bob@example.com", exclusive=True, temp_lease_id="temp-lease-success")
+    assert manager.is_identity_locked("bob@example.com") is True
+    manager.rollback_identity("bob@example.com", "temp-lease-success")
+
+
+def test_target_registry_re_registration():
+    """Verifies that re-registering an existing target under a new lease cleans up the old lease's target set."""
+    registry = TargetRegistry()
+
+    # Register under lease-1
+    registry.register_target("target-shared", "ctx-1", "lease-1", "agent-1")
+    assert registry.is_target_owned_by_lease("target-shared", "lease-1") is True
+    assert "target-shared" in [t.target_id for t in registry.get_targets_for_lease("lease-1")]
+
+    # Re-register under lease-2
+    registry.register_target("target-shared", "ctx-1", "lease-2", "agent-2")
+    assert registry.is_target_owned_by_lease("target-shared", "lease-2") is True
+    assert registry.is_target_owned_by_lease("target-shared", "lease-1") is False
+
+    # Check lease target sets
+    assert "target-shared" not in [t.target_id for t in registry.get_targets_for_lease("lease-1")]
+    assert "target-shared" in [t.target_id for t in registry.get_targets_for_lease("lease-2")]
+
+
+def test_profile_sanctity_constructor_guards():
+    """Verifies that AuthStateVault and SessionRouter refuse to mount ~/.chrome-ai-profile in constructors."""
+    protected_path = Path("~/.chrome-ai-profile").expanduser()
+
+    with pytest.raises(PermissionError) as exc_vault:
+        AuthStateVault(vault_dir=protected_path)
+    assert "SAFETY INVARIANT 9 VIOLATION" in str(exc_vault.value)
+
+    with pytest.raises(PermissionError) as exc_router:
+        SessionRouter(state_dir=protected_path)
+    assert "SAFETY INVARIANT 9 VIOLATION" in str(exc_router.value)
+
+
+def test_auth_state_vault_atomic_and_numeric_sort(temp_broker_dir):
+    """Verifies numeric version sorting (v1, v2, ... v12) and atomic latest.json pointer."""
+    vault = AuthStateVault(vault_dir=Path(temp_broker_dir) / "vault")
+
+    # Create 12 snapshots to test v10, v11, v12 sorting over v2, v3
+    for i in range(1, 13):
+        ver = vault.save_snapshot(
+            identity="test-user",
+            cookies=[{"name": "token", "value": f"val-{i}", "domain": "example.com"}],
+            local_storage={"counter": str(i)},
+        )
+        assert ver == f"v{i}"
+
+    # Verify list_snapshots is in numeric order
+    snapshots = vault.list_snapshots("test-user")
+    expected = [f"v{i}" for i in range(1, 13)]
+    assert [s["version"] for s in snapshots] == expected
+
+    # Verify latest snapshot matches v12
+    latest = vault.get_latest_snapshot("test-user")
+    assert latest is not None
+    assert latest["cookies"][0]["value"] == "val-12"
+    assert latest["local_storage"]["counter"] == "12"
+
+    # Verify latest.json pointer file
+    latest_file = Path(temp_broker_dir) / "vault" / "test-user" / "latest.json"
+    assert latest_file.exists()
+    assert stat.S_IMODE(latest_file.stat().st_mode) == 0o600
+
+
+def test_inter_process_state_lock_concurrency(temp_broker_dir):
+    """Verifies that concurrent threads/processes acquiring _state_lock on state.lock maintain serializability."""
+    import concurrent.futures
+
+    router = SessionRouter(
+        vault_dir=Path(temp_broker_dir) / "vault",
+        state_dir=Path(temp_broker_dir) / "broker",
+    )
+
+    counter = 0
+    num_workers = 10
+    iterations = 20
+
+    def worker():
+        nonlocal counter
+        for _ in range(iterations):
+            with router._state_lock():
+                current = counter
+                time.sleep(0.001)  # Simulate brief I/O work
+                counter = current + 1
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = [executor.submit(worker) for _ in range(num_workers)]
+            for f in futures:
+                f.result()
+
+        assert counter == num_workers * iterations
+    finally:
+        router.close()
+
