@@ -409,6 +409,8 @@ class LifecycleRecord:
     quarantine_reason: str | None = None
     quarantined_at: str | None = None
     utility_score: float = 1.0
+    content_digest: str | None = None
+    audit_log: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "LifecycleRecord":
@@ -424,6 +426,8 @@ class LifecycleRecord:
             quarantine_reason=data.get("quarantine_reason"),
             quarantined_at=data.get("quarantined_at"),
             utility_score=float(data.get("utility_score", 1.0)),
+            content_digest=data.get("content_digest"),
+            audit_log=list(data.get("audit_log", [])),
         )
 
     def to_dict(self) -> dict[str, Any]:

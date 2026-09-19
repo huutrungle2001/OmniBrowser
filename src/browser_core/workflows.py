@@ -20,6 +20,7 @@ try:
         ExecutionOutcome,
         MatcherSpec,
         PreconditionFailedError,
+        QuarantinedRecipeError,
         RecipeLifecycleState,
         RiskClass,
         RiskGateError,
@@ -50,6 +51,7 @@ except ImportError:
         ExecutionOutcome,
         MatcherSpec,
         PreconditionFailedError,
+        QuarantinedRecipeError,
         RecipeLifecycleState,
         RiskClass,
         RiskGateError,
@@ -360,6 +362,14 @@ class WorkflowEngine:
         current_state = plan.start_state
 
         for idx, edge in enumerate(plan.edges):
+            # Canonical quarantine check before executing edge
+            canonical_recipe = self.store.get(edge.recipe_id) if hasattr(self.store, "get") else None
+            if canonical_recipe is not None and hasattr(canonical_recipe, "lifecycle") and canonical_recipe.lifecycle.state == RecipeLifecycleState.QUARANTINED:
+                q_reason = getattr(canonical_recipe.lifecycle, "quarantine_reason", "quarantined")
+                raise QuarantinedRecipeError(
+                    f"Workflow edge {idx} ('{edge.edge_id}') uses QUARANTINED recipe '{edge.recipe_id}' ({q_reason}). Execution blocked."
+                )
+
             # 2. Per-edge R4 Gate Check
             if edge.risk_class == RiskClass.R4_IRREVERSIBLE and not allow_r4:
                 raise RiskGateError(

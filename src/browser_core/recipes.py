@@ -8,6 +8,7 @@ the page no longer matches the recorded procedure.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import fcntl
 import fnmatch
 import json
 import os
@@ -544,6 +545,7 @@ class Recipe:
     safety: SafetySpec = field(default_factory=SafetySpec)
     health: HealthStats = field(default_factory=HealthStats)
     lifecycle: LifecycleRecord = field(default_factory=LifecycleRecord)
+    action_type: str = ""
 
     def __post_init__(self) -> None:
         self.metadata = _defaults(self.metadata)
@@ -655,6 +657,7 @@ class Recipe:
             safety=safety,
             health=health,
             lifecycle=lifecycle,
+            action_type=str(data.get("action_type", "")),
         )
 
     @classmethod
@@ -668,7 +671,7 @@ class Recipe:
 
     def to_dict(self) -> dict[str, Any]:
         kind = "omnibrowser.recipe_candidate" if (self.metadata.get("automatic") or self.metadata.get("status") == "draft") else "omnibrowser.recipe"
-        return {
+        res = {
             "kind": kind,
             "schema_version": 2,
             "id": self.id,
@@ -685,6 +688,9 @@ class Recipe:
             "health": self.health.to_dict(),
             "lifecycle": self.lifecycle.to_dict(),
         }
+        if self.action_type:
+            res["action_type"] = self.action_type
+        return res
 
 
     def to_json(self, *, indent: int = 2) -> str:
@@ -743,6 +749,25 @@ class Recipe:
                 except re.error:
                     pass
         return False
+
+
+def compute_recipe_content_digest(recipe: Recipe) -> str:
+    """Deterministic SHA256 hex digest of executable recipe content."""
+    action_type = getattr(recipe, "action_type", "")
+    domain_pattern = getattr(recipe, "domain_pattern", "*")
+    steps = [s.to_dict() if hasattr(s, "to_dict") else s for s in getattr(recipe, "steps", [])]
+    matcher = recipe.matcher.to_dict() if hasattr(recipe.matcher, "to_dict") else getattr(recipe, "matcher", {})
+    safety = recipe.safety.to_dict() if hasattr(recipe.safety, "to_dict") else getattr(recipe, "safety", {})
+
+    payload = [
+        action_type,
+        domain_pattern,
+        steps,
+        matcher,
+        safety,
+    ]
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def calculate_utility_score(recipe: Recipe, now_ts: float | None = None) -> float:
@@ -858,6 +883,44 @@ def evaluate_promotion(
     return None
 
 
+def check_policy_qualifies_for(
+    recipe: Recipe,
+    target_state: str,
+    policy: PromotionPolicy | None = None,
+) -> bool:
+    """Check if recipe's current evidence satisfies the promotion policy criteria for target_state."""
+    if policy is None:
+        policy = PromotionPolicy()
+
+    clean_state = str(target_state).strip().upper()
+    if clean_state == RecipeLifecycleState.DRAFT:
+        return True
+
+    successes = getattr(recipe.health, "successes", 0) if hasattr(recipe, "health") else int(recipe.metadata.get("success_count", 0))
+    failures = getattr(recipe.health, "failures", 0) if hasattr(recipe, "health") else int(recipe.metadata.get("failure_count", 0))
+    executions = getattr(recipe.health, "executions", 0) if hasattr(recipe, "health") else 0
+    health_score = getattr(recipe.health, "health_score", 1.0) if hasattr(recipe, "health") else 1.0
+
+    sessions_seen = set(getattr(recipe.lifecycle, "sessions_seen", [])) if hasattr(recipe, "lifecycle") else set()
+    agents_seen = set(getattr(recipe.lifecycle, "agents_seen", [])) if hasattr(recipe, "lifecycle") else set()
+
+    if clean_state == RecipeLifecycleState.VERIFIED_LOCAL:
+        return successes >= policy.min_successes_local
+    if clean_state == RecipeLifecycleState.VERIFIED_SHARED:
+        return (
+            successes >= policy.min_successes_shared
+            and len(sessions_seen) >= policy.min_independent_sessions
+            and failures == 0
+        )
+    if clean_state == RecipeLifecycleState.CURATED:
+        return (
+            executions >= policy.min_executions_curated
+            and len(agents_seen) >= policy.min_independent_agents
+            and health_score >= policy.curated_success_rate
+        )
+    return False
+
+
 def check_quarantine_triggers(
     recipe: Recipe,
     last_outcome: str | None = None,
@@ -902,7 +965,7 @@ class RecipeStore:
         if not self.root.exists():
             return []
         for path in sorted(self.root.rglob("*.json")):
-            if "sitemaps" in path.parts:
+            if "sitemaps" in path.parts or ".locks" in path.parts or path.name.startswith("."):
                 continue
             try:
                 recipe = Recipe.from_json(path.read_bytes())
@@ -927,6 +990,16 @@ class RecipeStore:
     def get(self, recipe_id: str) -> Recipe | None:
         if not self._recipes:
             self.load()
+        if self.root.exists():
+            for p in self.root.rglob(f"{recipe_id}.json"):
+                if p.is_file() and "sitemaps" not in p.parts and ".locks" not in p.parts and not p.name.startswith("."):
+                    try:
+                        rec = Recipe.from_json(p.read_bytes())
+                        self._recipes[rec.id] = rec
+                        return rec
+                    except Exception:
+                        pass
+                    break
         return self._recipes.get(recipe_id)
 
     get_recipe = get
@@ -942,10 +1015,13 @@ class RecipeStore:
         domain: str | None = None,
         expected_revision: int | None = None,
     ) -> Path:
+        if not hasattr(recipe, "lifecycle") or recipe.lifecycle is None:
+            recipe.lifecycle = LifecycleRecord()
+
         target_path = None
         if self.root.exists():
             for p in self.root.rglob(f"{recipe.id}.json"):
-                if p.is_file() and "sitemaps" not in p.parts:
+                if p.is_file() and "sitemaps" not in p.parts and ".locks" not in p.parts and not p.name.startswith("."):
                     target_path = p
                     break
 
@@ -965,32 +1041,71 @@ class RecipeStore:
             save_dir.mkdir(parents=True, exist_ok=True)
             path = save_dir / f"{recipe.id}.json"
 
-        # Optimistic Concurrency Control (CAS check)
-        if expected_revision is not None:
-            disk_rev = None
-            if path.exists():
+        # Inter-process lock using lockfile
+        locks_dir = self.root / ".locks"
+        locks_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = locks_dir / f"{recipe.id}.lock"
+
+        with open(lock_path, "a+") as lf:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+            try:
+                # 1. Read authoritative disk revision and content digest if path exists
+                disk_rev = None
+                disk_digest = None
+                if path.exists():
+                    try:
+                        existing_data = json.loads(path.read_text(encoding="utf-8"))
+                        existing_lc = existing_data.get("lifecycle", {})
+                        disk_rev = int(existing_lc.get("revision", 1))
+                        disk_digest = existing_lc.get("content_digest")
+                    except Exception:
+                        disk_rev = None
+                        disk_digest = None
+
+                # 2. Check content mutation
+                current_digest = compute_recipe_content_digest(recipe)
+                base_digest = recipe.lifecycle.content_digest if recipe.lifecycle.content_digest is not None else disk_digest
+                if base_digest is not None and base_digest != current_digest:
+                    recipe.lifecycle.generation += 1
+                    recipe.lifecycle.content_digest = current_digest
+                    recipe.lifecycle.sessions_seen = []
+                    recipe.lifecycle.agents_seen = []
+                    recipe.lifecycle.consecutive_failures = 0
+                    if recipe.lifecycle.state in (RecipeLifecycleState.VERIFIED_SHARED, RecipeLifecycleState.CURATED):
+                        recipe.lifecycle.state = RecipeLifecycleState.VERIFIED_LOCAL
+                else:
+                    recipe.lifecycle.content_digest = current_digest
+
+                # 3. Optimistic Concurrency Control (CAS check)
+                if expected_revision is not None:
+                    if disk_rev is None or disk_rev != expected_revision:
+                        raise CASConflictError(
+                            f"CAS conflict saving recipe '{recipe.id}': expected revision {expected_revision}, but found revision {disk_rev} on disk"
+                        )
+
+                # 4. Update revision
+                if disk_rev is not None:
+                    recipe.lifecycle.revision = disk_rev + 1
+                else:
+                    recipe.lifecycle.revision += 1
+
+                # 5. Update utility score
+                recipe.lifecycle.utility_score = calculate_utility_score(recipe)
+
+                # 6. Write to atomic temp file and os.replace over destination path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                temp_path = path.parent / f".tmp_{uuid4().hex}_{recipe.id}.json"
+                temp_path.write_text(recipe.to_json(), encoding="utf-8")
+                os.replace(temp_path, path)
+
+                # 7. Update in-memory cache
+                self._recipes[recipe.id] = recipe
+                return path
+            finally:
                 try:
-                    existing_data = json.loads(path.read_text(encoding="utf-8"))
-                    existing_lc = existing_data.get("lifecycle", {})
-                    disk_rev = int(existing_lc.get("revision", 1))
-                except Exception:
-                    disk_rev = None
-            elif recipe.id in self._recipes:
-                existing_rec = self._recipes[recipe.id]
-                disk_rev = getattr(existing_rec.lifecycle, "revision", 1) if hasattr(existing_rec, "lifecycle") else 1
-
-            if disk_rev is not None and disk_rev != expected_revision:
-                raise CASConflictError(
-                    f"CAS conflict saving recipe '{recipe.id}': expected revision {expected_revision}, but found revision {disk_rev} on disk"
-                )
-
-        if hasattr(recipe, "lifecycle"):
-            recipe.lifecycle.revision += 1
-            recipe.lifecycle.utility_score = calculate_utility_score(recipe)
-
-        path.write_text(recipe.to_json(), encoding="utf-8")
-        self._recipes[recipe.id] = recipe
-        return path
+                    fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
 
     def quarantine(self, recipe_id: str, reason: str = "administrative_quarantine") -> Recipe:
         recipe = self.get(recipe_id)
@@ -1007,11 +1122,20 @@ class RecipeStore:
         recipe = self.get(recipe_id)
         if recipe is None:
             raise ValueError(f"Recipe not found: {recipe_id}")
-        if hasattr(recipe, "lifecycle"):
-            recipe.lifecycle.state = RecipeLifecycleState.VERIFIED_LOCAL
-            recipe.lifecycle.consecutive_failures = 0
-            recipe.lifecycle.quarantine_reason = None
-            recipe.lifecycle.quarantined_at = None
+        if not hasattr(recipe, "lifecycle") or recipe.lifecycle is None:
+            recipe.lifecycle = LifecycleRecord()
+        recipe.lifecycle.state = RecipeLifecycleState.VERIFIED_LOCAL
+        recipe.lifecycle.consecutive_failures = 0
+        recipe.lifecycle.quarantine_reason = None
+        recipe.lifecycle.quarantined_at = None
+        if hasattr(recipe, "metadata"):
+            recipe.metadata["failure_count"] = 0
+            recipe.metadata["last_failure_reason"] = None
+        if hasattr(recipe, "health"):
+            recipe.health.failures = 0
+            recipe.health.precondition_failures = 0
+            recipe.health.forbidden_anchor_failures = 0
+            recipe.health.unknown_side_effects = 0
         self.save(recipe)
         return recipe
 
@@ -1020,10 +1144,17 @@ class RecipeStore:
         recipe_id: str,
         target_state: str | None = None,
         policy: PromotionPolicy | None = None,
+        *,
+        privileged: bool = False,
+        actor: str | None = None,
+        reason: str | None = None,
     ) -> Recipe:
         recipe = self.get(recipe_id)
         if recipe is None:
             raise ValueError(f"Recipe not found: {recipe_id}")
+        if not hasattr(recipe, "lifecycle") or recipe.lifecycle is None:
+            recipe.lifecycle = LifecycleRecord()
+
         if target_state is not None:
             clean_state = str(target_state).strip().upper()
             valid_states = {
@@ -1037,7 +1168,29 @@ class RecipeStore:
             }
             if clean_state not in valid_states:
                 raise ValueError(f"Invalid target lifecycle state: {target_state}")
-            recipe.lifecycle.state = clean_state
+
+            qualifies = check_policy_qualifies_for(recipe, clean_state, policy=policy)
+            if qualifies:
+                recipe.lifecycle.state = clean_state
+            else:
+                if privileged:
+                    if not actor or not str(actor).strip() or not reason or not str(reason).strip():
+                        raise ValueError("Privileged promotion requires non-empty actor and reason")
+                    prev_state = recipe.lifecycle.state
+                    entry = {
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "actor": str(actor).strip(),
+                        "reason": str(reason).strip(),
+                        "from_state": prev_state,
+                        "to_state": clean_state,
+                        "revision": recipe.lifecycle.revision,
+                    }
+                    recipe.lifecycle.audit_log.append(entry)
+                    recipe.lifecycle.state = clean_state
+                else:
+                    raise PermissionError(
+                        f"Target state '{target_state}' requires policy evidence or explicit privileged=True override"
+                    )
         else:
             next_state = evaluate_promotion(recipe, policy=policy)
             if not next_state:
@@ -1576,13 +1729,18 @@ class RecipeEngine:
         session_id: str | None = None,
         agent_id: str | None = None,
     ) -> RecipeExecutionResult:
-        if isinstance(recipe, str):
-            if self.store is None:
-                raise ValueError("RecipeStore is required when recipe is an id")
-            found = self.store.get(recipe)
-            if found is None:
-                raise KeyError(f"Unknown recipe: {recipe}")
-            recipe = found
+        recipe_id = recipe if isinstance(recipe, str) else getattr(recipe, "id", None)
+        if self.store is not None and recipe_id:
+            canonical = self.store.get(recipe_id)
+            if canonical is not None and hasattr(canonical, "lifecycle") and canonical.lifecycle.state == RecipeLifecycleState.QUARANTINED:
+                q_reason = getattr(canonical.lifecycle, "quarantine_reason", "quarantined")
+                raise QuarantinedRecipeError(f"Cannot execute recipe '{recipe_id}': Recipe is QUARANTINED ({q_reason})")
+            if isinstance(recipe, str):
+                if canonical is None:
+                    raise KeyError(f"Unknown recipe: {recipe_id}")
+                recipe = canonical
+        elif isinstance(recipe, str):
+            raise ValueError("RecipeStore is required when recipe is an id")
 
         if hasattr(recipe, "lifecycle") and recipe.lifecycle.state == RecipeLifecycleState.QUARANTINED:
             q_reason = getattr(recipe.lifecycle, "quarantine_reason", "quarantined")

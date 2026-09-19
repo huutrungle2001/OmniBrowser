@@ -552,7 +552,16 @@ def cmd_recipe_promote(args):
     recipe = store.get(recipe_id)
     if recipe is not None:
         target_state = getattr(args, "target_state", None)
-        promoted = store.promote(recipe_id, target_state=target_state)
+        privileged = getattr(args, "privileged", False)
+        actor = getattr(args, "actor", None)
+        reason = getattr(args, "reason", None)
+        promoted = store.promote(
+            recipe_id,
+            target_state=target_state,
+            privileged=privileged,
+            actor=actor,
+            reason=reason,
+        )
         _json(_recipe_value(promoted))
         return 0
 
@@ -987,6 +996,9 @@ def _parser():
     p_promote = recipe_sub.add_parser("promote", help="Promote a recipe or local learned draft")
     p_promote.add_argument("recipe_id", help="Recipe ID or candidate ID to promote")
     p_promote.add_argument("--target-state", default=None, help="Target lifecycle state (e.g. VERIFIED_SHARED, CURATED)")
+    p_promote.add_argument("--privileged", action="store_true", default=False, help="Explicit privileged administrative override")
+    p_promote.add_argument("--actor", default=None, help="Actor identity performing privileged promotion")
+    p_promote.add_argument("--reason", default=None, help="Reason for privileged promotion")
     p_promote.add_argument("--approve", action="store_true", default=False, help="Approve learned draft promotion")
     p_promote.add_argument("--recipes-dir", default=None, help="Recipe directory (defaults to ./recipes)")
     p_promote.add_argument("--memory-root", default=None, help="Learning memory root")
