@@ -31,6 +31,7 @@ from browser_core.broker import (
 from browser_core.contracts import (
     AdmissionRejectedError,
     BrowserRequirements,
+    BrokerStateUnavailableError,
     ExecutionClass,
     IdentityConflictError,
     LeaseExpiredError,
@@ -741,3 +742,186 @@ def test_orphan_reconciler(temp_broker_dir):
         router.close()
 
 
+def test_save_state_failure_fails_closed(temp_broker_dir, monkeypatch):
+    """Verifies that if _save_state fails (e.g. disk full / permission error), the broker fails closed."""
+    router = SessionRouter(
+        vault_dir=Path(temp_broker_dir) / "vault",
+        state_dir=Path(temp_broker_dir) / "broker",
+    )
+    try:
+        orig_open = os.open
+
+        def fail_open(path, flags, *args, **kwargs):
+            if ".tmp_state_" in str(path):
+                raise OSError("Disk write error")
+            return orig_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", fail_open)
+
+        with pytest.raises(BrokerStateUnavailableError) as exc_info:
+            router.request_lease(
+                BrowserRequirements(execution_class=ExecutionClass.CLASS_S, auth_identity="user@example.com"),
+                agent_id="agent-1",
+                project_id="proj-1",
+            )
+        assert "Control-plane state persistence failed" in str(exc_info.value)
+
+        # Verify identity reservation was rolled back
+        assert router.lease_manager.is_identity_locked("user@example.com") is False
+    finally:
+        monkeypatch.undo()
+        router.close()
+
+
+def test_load_state_corrupt_fails_closed(temp_broker_dir):
+    """Verifies that corrupted state.json raises BrokerStateUnavailableError instead of partial/stale load."""
+    state_dir = Path(temp_broker_dir) / "broker"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_file = state_dir / "state.json"
+    state_file.write_text("{corrupt: json content here!!", encoding="utf-8")
+
+    with pytest.raises(BrokerStateUnavailableError) as exc_info:
+        SessionRouter(
+            vault_dir=Path(temp_broker_dir) / "vault",
+            state_dir=state_dir,
+        )
+    assert "Failed to load authoritative broker state" in str(exc_info.value)
+
+
+def test_pid_reuse_guard_refuses_to_kill_unrelated_process(temp_broker_dir):
+    """Verifies PID reuse guard: if a PID is found in chrome.pid but cmdline doesn't match, do not kill it."""
+    from browser_core.broker.session_router import _is_matching_chrome_process
+    import subprocess
+
+    router = SessionRouter(
+        vault_dir=Path(temp_broker_dir) / "vault",
+        state_dir=Path(temp_broker_dir) / "broker",
+    )
+    try:
+        orphan_dir = router.runtime_root / "omnibrowser_fake_orphan"
+        orphan_dir.mkdir(parents=True, exist_ok=True)
+        # Set old mtime (> 20s ago)
+        old_time = time.time() - 25.0
+        os.utime(orphan_dir, (old_time, old_time))
+
+        # Launch an unrelated process (e.g. sleep)
+        proc = subprocess.Popen(["sleep", "30"])
+        try:
+            (orphan_dir / "chrome.pid").write_text(str(proc.pid), encoding="utf-8")
+
+            # Verify _is_matching_chrome_process returns False for this sleep process
+            assert _is_matching_chrome_process(proc.pid, str(orphan_dir)) is False
+
+            # Run reconciler
+            router._reconcile_orphans()
+
+            # Process must still be alive!
+            assert proc.poll() is None
+        finally:
+            proc.kill()
+            proc.wait()
+    finally:
+        router.close()
+
+
+def test_orphan_class_s_context_swept(temp_broker_dir):
+    """Verifies that orphaned BrowserContexts on Class S daemons are discovered and swept."""
+    from browser_core.cdp_client import CDPClient, get_browser_ws_url
+
+    router = SessionRouter(
+        vault_dir=Path(temp_broker_dir) / "vault",
+        state_dir=Path(temp_broker_dir) / "broker",
+    )
+    try:
+        # Request a Class S lease to start daemon
+        lease = router.request_lease(
+            BrowserRequirements(execution_class=ExecutionClass.CLASS_S),
+            agent_id="agent-1",
+            project_id="proj-1",
+        )
+        assert lease.browser_context_id is not None
+
+        # Manually create an orphaned browser context on the daemon via CDP
+        ws_url = get_browser_ws_url(lease.cdp_url)
+        with CDPClient(ws_url) as cdp:
+            ctx_res = cdp.request("Target.createBrowserContext")
+            orphan_ctx_id = ctx_res["result"]["browserContextId"]
+
+            # Verify both contexts exist
+            bc_res = cdp.request("Target.getBrowserContexts")
+            ctx_ids = bc_res.get("result", {}).get("browserContextIds", [])
+            assert orphan_ctx_id in ctx_ids
+            assert lease.browser_context_id in ctx_ids
+
+            # Reconcile orphans - must sweep orphan_ctx_id!
+            router._reconcile_orphans()
+
+            # Verify orphan context was disposed, but lease context remains intact
+            bc_res_after = cdp.request("Target.getBrowserContexts")
+            ctx_ids_after = bc_res_after.get("result", {}).get("browserContextIds", [])
+            assert orphan_ctx_id not in ctx_ids_after
+            assert lease.browser_context_id in ctx_ids_after
+    finally:
+        router.close()
+
+
+def test_dead_dedicated_process_invalidates_lease(temp_broker_dir):
+    """Verifies that if a dedicated Chrome process dies, the active lease is invalidated on reconcile."""
+    import signal
+
+    router = SessionRouter(
+        vault_dir=Path(temp_broker_dir) / "vault",
+        state_dir=Path(temp_broker_dir) / "broker",
+    )
+    try:
+        lease = router.request_lease(
+            BrowserRequirements(execution_class=ExecutionClass.CLASS_I, auth_identity="dedicated-user"),
+            agent_id="agent-1",
+            project_id="proj-1",
+        )
+        assert lease.is_active is True
+        assert lease.process_pid is not None
+
+        # Kill the dedicated Chrome process
+        os.kill(lease.process_pid, signal.SIGKILL)
+        time.sleep(0.1)
+
+        # Run reconciler
+        router._reconcile_orphans()
+
+        # Verify lease is now marked inactive and identity is unlocked
+        assert lease.is_active is False
+        assert router.lease_manager.is_identity_locked("dedicated-user") is False
+    finally:
+        router.close()
+
+
+def test_dead_daemon_invalidates_class_s_leases(temp_broker_dir):
+    """Verifies that if a Class S daemon dies, all active leases on it are invalidated on reconcile."""
+    import signal
+
+    router = SessionRouter(
+        vault_dir=Path(temp_broker_dir) / "vault",
+        state_dir=Path(temp_broker_dir) / "broker",
+    )
+    try:
+        lease = router.request_lease(
+            BrowserRequirements(execution_class=ExecutionClass.CLASS_S, auth_identity="shared-user"),
+            agent_id="agent-1",
+            project_id="proj-1",
+        )
+        assert lease.is_active is True
+        assert lease.process_pid is not None
+
+        # Kill the Class S daemon process
+        os.kill(lease.process_pid, signal.SIGKILL)
+        time.sleep(0.1)
+
+        # Run reconciler
+        router._reconcile_orphans()
+
+        # Verify lease is now marked inactive and identity is unlocked
+        assert lease.is_active is False
+        assert router.lease_manager.is_identity_locked("shared-user") is False
+    finally:
+        router.close()

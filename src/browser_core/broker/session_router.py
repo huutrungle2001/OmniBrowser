@@ -28,6 +28,7 @@ import uuid
 from ..cdp_client import CDPClient, get_browser_ws_url, is_cdp_alive
 from ..contracts import (
     AdmissionRejectedError,
+    BrokerStateUnavailableError,
     BrowserRequirements,
     ExecutionClass,
     IdentityConflictError,
@@ -40,6 +41,58 @@ from .auth_state_vault import AuthStateVault
 from .lease_manager import LeaseManager
 from .lifecycle_watchdog import LifecycleWatchdog
 from .target_registry import TargetRegistry
+
+
+def _is_matching_chrome_process(pid: int, expected_udir: str) -> bool:
+    """Verifies that a PID is an actual Chrome process bound to expected user_data_dir, preventing PID reuse kill."""
+    try:
+        res = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+        )
+        if res.returncode != 0 or not res.stdout:
+            return False
+        cmd = res.stdout.strip()
+        is_chrome = "chrome" in cmd.lower() or "chromium" in cmd.lower()
+        has_udir = expected_udir in cmd
+        return is_chrome and has_udir
+    except Exception:
+        return False
+
+
+def _is_process_alive(pid: int, popen_obj: subprocess.Popen | None = None) -> bool:
+    """Checks if a process is truly alive, handling child zombies and cross-process zombies."""
+    if popen_obj is not None:
+        return popen_obj.poll() is None
+    try:
+        wpid, _ = os.waitpid(pid, os.WNOHANG)
+        if wpid != 0:
+            return False
+    except (ChildProcessError, OSError):
+        pass
+
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+
+    try:
+        res = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "state="],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+        )
+        if res.returncode != 0 or not res.stdout:
+            return False
+        if "Z" in res.stdout.strip():
+            return False
+    except Exception:
+        pass
+
+    return True
 
 
 def find_chrome_binary() -> str:
@@ -144,7 +197,7 @@ class SessionRouter:
                 os.close(lock_fd)
 
     def _save_state(self) -> None:
-        """Persist broker state for cross-process CLI invocations."""
+        """Persist broker state for cross-process CLI invocations (Fail-closed & Durable)."""
         try:
             self.state_dir.mkdir(parents=True, exist_ok=True)
             daemons_data = {}
@@ -177,49 +230,124 @@ class SessionRouter:
                 "targets": [t.to_dict() for t in self.target_registry.get_all_records()],
             }
             temp_file = self.state_dir / f".tmp_state_{os.getpid()}_{uuid.uuid4().hex}.json"
-            temp_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
+            fd = os.open(temp_file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(state_data, f, indent=2)
+                f.flush()
+                os.fsync(fd)
             temp_file.replace(self.state_file)
         except Exception as exc:
-            import sys
-            print(f"[SessionRouter] Warning: failed to save state: {exc}", file=sys.stderr)
+            raise BrokerStateUnavailableError(f"Control-plane state persistence failed: {exc}") from exc
 
     def _reconcile_orphans(self) -> None:
-        """Scans and reaps orphaned Chrome processes and runtime directories."""
+        """Scans and reaps orphaned Chrome processes, dead lease processes, and orphaned BrowserContexts."""
         active_user_dirs = set()
+        active_pids = set()
+        active_class_s_contexts = set()
+
         for l in self.lease_manager.get_active_leases():
             if l.user_data_dir:
                 active_user_dirs.add(Path(l.user_data_dir).resolve())
+            if l.process_pid:
+                active_pids.add(l.process_pid)
+            if l.browser_context_id:
+                active_class_s_contexts.add(l.browser_context_id)
 
-        for did, dinfo in self._class_s_daemons.items():
+        for did, dinfo in list(self._class_s_daemons.items()):
             udir = dinfo.get("user_data_dir")
             if udir:
                 active_user_dirs.add(Path(udir).resolve())
+            pid = dinfo.get("pid")
+            if pid:
+                active_pids.add(pid)
 
-        # 1. Clean orphaned runtime directories (> 60s old and unreferenced)
+        # 1. Scan runtime_root for unreferenced directories & kill uncommitted orphan Chrome PIDs
         now = time.time()
         if self.runtime_root.exists():
             for p in self.runtime_root.iterdir():
                 if p.is_dir() and p.resolve() not in active_user_dirs:
                     try:
                         mtime = p.stat().st_mtime
-                        if now - mtime > 60.0:
+                        pid_file = p / "chrome.pid"
+                        if pid_file.exists():
+                            try:
+                                orphan_pid = int(pid_file.read_text(encoding="utf-8").strip())
+                                if now - mtime > 15.0 and _is_matching_chrome_process(orphan_pid, str(p)):
+                                    os.kill(orphan_pid, signal.SIGTERM)
+                                    time.sleep(0.05)
+                                    try:
+                                        os.kill(orphan_pid, signal.SIGKILL)
+                                    except OSError:
+                                        pass
+                            except (ValueError, OSError):
+                                pass
+
+                        if now - mtime > 30.0:
                             shutil.rmtree(p, ignore_errors=True)
                     except OSError:
                         pass
 
-        # 2. Reconcile dead or unreferenced dedicated processes
+        # 2. Check active dedicated leases for dead processes (detect dead dedicated Chrome)
+        for lid, lease in list(self.lease_manager._leases.items()):
+            if lease.is_active and lease.execution_class in (ExecutionClass.CLASS_I, ExecutionClass.CLASS_A):
+                if lease.process_pid:
+                    proc_info = self._dedicated_processes.get(lid)
+                    popen_obj = proc_info[0] if proc_info else None
+                    if not _is_process_alive(lease.process_pid, popen_obj):
+                        # Dead dedicated process!
+                        lease.is_active = False
+                        if lease.auth_identity:
+                            self.lease_manager.rollback_identity(lease.auth_identity, lid)
+                        self.target_registry.clear_lease_targets(lid)
+
+        # 3. Check live Class S daemons & sweep orphaned BrowserContexts
+        for did, dinfo in list(self._class_s_daemons.items()):
+            pid = dinfo.get("pid")
+            cdp_url = dinfo.get("cdp_url")
+            popen_obj = dinfo.get("process")
+            daemon_dead = False
+            if pid:
+                if not _is_process_alive(pid, popen_obj):
+                    daemon_dead = True
+            if not cdp_url or not is_cdp_alive(cdp_url):
+                daemon_dead = True
+
+            if daemon_dead:
+                # Invalidate all leases on this dead daemon
+                for lid, lease in list(self.lease_manager._leases.items()):
+                    if lease.is_active and lease.browser_instance_id == did:
+                        lease.is_active = False
+                        if lease.auth_identity:
+                            self.lease_manager.rollback_identity(lease.auth_identity, lid)
+                        self.target_registry.clear_lease_targets(lid)
+                self._class_s_daemons.pop(did, None)
+                self.watchdog.unregister_daemon(did)
+            else:
+                # Sweep orphan BrowserContexts on live daemon
+                try:
+                    ws_url = get_browser_ws_url(cdp_url)
+                    with CDPClient(ws_url) as cdp:
+                        bc_res = cdp.request("Target.getBrowserContexts")
+                        context_ids = bc_res.get("result", {}).get("browserContextIds", [])
+                        for ctx_id in context_ids:
+                            if ctx_id not in active_class_s_contexts:
+                                cdp.request("Target.disposeBrowserContext", {"browserContextId": ctx_id})
+                except Exception:
+                    pass
+
+        # 4. Reconcile dead or unreferenced dedicated processes from _dedicated_processes_data
         for lid, pdata in list(self._dedicated_processes_data.items()):
             lease = self.lease_manager.get_lease(lid)
             if not lease or not lease.is_active:
                 pid = pdata.get("pid")
-                if pid:
+                udir = pdata.get("user_data_dir")
+                if pid and udir and _is_matching_chrome_process(pid, udir):
                     try:
                         os.kill(pid, signal.SIGTERM)
                         time.sleep(0.05)
                         os.kill(pid, signal.SIGKILL)
                     except OSError:
                         pass
-                udir = pdata.get("user_data_dir")
                 if udir and os.path.exists(udir):
                     shutil.rmtree(udir, ignore_errors=True)
                 self._dedicated_processes_data.pop(lid, None)
@@ -235,7 +363,7 @@ class SessionRouter:
                     dinfo["is_draining"] = True
 
     def _load_state(self) -> None:
-        """Load persisted broker state atomically from disk (Authoritative)."""
+        """Load persisted broker state atomically from disk (Authoritative, Fail-closed)."""
         if not self.state_file.exists():
             return
         try:
@@ -295,32 +423,24 @@ class SessionRouter:
                 cdp_url = dinfo.get("cdp_url")
                 is_draining = dinfo.get("is_draining", False)
                 if pid and cdp_url:
-                    try:
-                        os.kill(pid, 0)
-                        if is_cdp_alive(cdp_url):
-                            new_daemons[did] = {
-                                "instance_id": did,
-                                "process": existing_proc,
-                                "pid": pid,
-                                "cdp_url": cdp_url,
-                                "user_data_dir": dinfo.get("user_data_dir"),
-                                "is_draining": is_draining,
-                            }
-                            self.watchdog.register_daemon(did, pid, max_rss_mb=2048)
-                            if is_draining:
-                                self.watchdog.mark_draining(did, "Persisted draining state")
-                    except OSError:
-                        pass
+                    if _is_process_alive(pid, existing_proc) and is_cdp_alive(cdp_url):
+                        new_daemons[did] = {
+                            "instance_id": did,
+                            "process": existing_proc,
+                            "pid": pid,
+                            "cdp_url": cdp_url,
+                            "user_data_dir": dinfo.get("user_data_dir"),
+                            "is_draining": is_draining,
+                        }
+                        self.watchdog.register_daemon(did, pid, max_rss_mb=2048)
+                        if is_draining:
+                            self.watchdog.mark_draining(did, "Persisted draining state")
             self._class_s_daemons = new_daemons
 
             self._dedicated_processes_data = dict(state_data.get("dedicated_processes", {}))
             self._reconcile_orphans()
-        except json.JSONDecodeError as exc:
-            import sys
-            print(f"[SessionRouter] Warning: corrupted state file: {exc}", file=sys.stderr)
         except Exception as exc:
-            import sys
-            print(f"[SessionRouter] Warning: failed to load state: {exc}", file=sys.stderr)
+            raise BrokerStateUnavailableError(f"Failed to load authoritative broker state: {exc}") from exc
 
     def _ensure_class_s_daemon(self) -> tuple[str, str]:
         """Starts or returns an active Class S daemon. Returns (instance_id, cdp_url)."""
@@ -360,6 +480,8 @@ class SessionRouter:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        # Record PID immediately for orphan recovery
+        (Path(temp_dir) / "chrome.pid").write_text(str(process.pid), encoding="utf-8")
 
         active_port_file = Path(temp_dir, "DevToolsActivePort")
         deadline = time.monotonic() + 10.0
@@ -443,28 +565,43 @@ class SessionRouter:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        # Record PID immediately for orphan recovery
+        (Path(temp_dir) / "chrome.pid").write_text(str(process.pid), encoding="utf-8")
 
-        active_port_file = Path(temp_dir, "DevToolsActivePort")
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline and not active_port_file.exists():
-            if process.poll() is not None:
-                raise RuntimeError(f"Class {execution_class} Chrome process exited prematurely.")
-            time.sleep(0.05)
+        try:
+            active_port_file = Path(temp_dir, "DevToolsActivePort")
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline and not active_port_file.exists():
+                if process.poll() is not None:
+                    raise RuntimeError(f"Class {execution_class} Chrome process exited prematurely.")
+                time.sleep(0.05)
 
-        if not active_port_file.exists():
-            process.terminate()
-            raise RuntimeError(f"Class {execution_class} Chrome process failed to expose DevToolsActivePort.")
+            if not active_port_file.exists():
+                process.terminate()
+                raise RuntimeError(f"Class {execution_class} Chrome process failed to expose DevToolsActivePort.")
 
-        port = int(active_port_file.read_text(encoding="utf-8").splitlines()[0])
-        cdp_url = f"http://127.0.0.1:{port}"
+            port = int(active_port_file.read_text(encoding="utf-8").splitlines()[0])
+            cdp_url = f"http://127.0.0.1:{port}"
 
-        # Deterministically create initial target via CDP (zero timing races or synthetic fallback)
-        ws_url = get_browser_ws_url(cdp_url)
-        with CDPClient(ws_url) as cdp:
-            t_res = cdp.request("Target.createTarget", {"url": "about:blank"})
-            real_target_id = t_res["result"]["targetId"]
+            # Deterministically create initial target via CDP (zero timing races or synthetic fallback)
+            ws_url = get_browser_ws_url(cdp_url)
+            with CDPClient(ws_url) as cdp:
+                t_res = cdp.request("Target.createTarget", {"url": "about:blank"})
+                real_target_id = t_res["result"]["targetId"]
 
-        return process, cdp_url, temp_dir, real_target_id
+            return process, cdp_url, temp_dir, real_target_id
+        except Exception:
+            try:
+                process.terminate()
+                process.wait(timeout=2)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
 
     def request_lease(
         self,
@@ -478,108 +615,135 @@ class SessionRouter:
 
         # Loop with backpressure to acquire admission and provision under state lock (prevent TOCTOU)
         while True:
-            with self._state_lock():
-                admitted, reason = self.admission.check_admission(
-                    requirements,
-                    current_active_leases=self.lease_manager.get_active_lease_count(),
-                )
-                if admitted:
-                    temp_lease_id = f"lease-{uuid.uuid4().hex[:12]}"
-
-                    # 2. Reserve identity before creating Chrome resources (prevent resource leaks)
-                    if requirements.auth_identity:
-                        self.lease_manager.reserve_identity(
-                            requirements.auth_identity,
-                            requirements.exclusive_identity,
-                            temp_lease_id,
-                        )
-
-                    try:
-                        # 3. Route and provision based on execution class
-                        if requirements.execution_class == ExecutionClass.CLASS_S:
-                            instance_id, cdp_url = self._ensure_class_s_daemon()
-                            ws_url = get_browser_ws_url(cdp_url)
-
-                            with CDPClient(ws_url) as cdp:
-                                ctx_res = cdp.request("Target.createBrowserContext")
-                                context_id = ctx_res["result"]["browserContextId"]
-                                t_res = cdp.request("Target.createTarget", {"url": "about:blank", "browserContextId": context_id})
-                                target_id = t_res["result"]["targetId"]
-
-                            dinfo = self._class_s_daemons[instance_id]
-                            lease = self.lease_manager.create_lease(
-                                agent_id=agent_id,
-                                project_id=project_id,
-                                execution_class=ExecutionClass.CLASS_S,
-                                cdp_url=cdp_url,
-                                timeout_seconds=requirements.timeout_seconds,
-                                auth_identity=requirements.auth_identity,
-                                exclusive_identity=requirements.exclusive_identity,
-                                browser_context_id=context_id,
-                                process_pid=dinfo.get("pid"),
-                                user_data_dir=dinfo.get("user_data_dir"),
-                                pre_reserved_lease_id=temp_lease_id,
-                                browser_instance_id=instance_id,
-                            )
-
-                            # Register initial target
-                            self.target_registry.register_target(
-                                target_id=target_id,
-                                browser_context_id=context_id,
-                                lease_id=lease.lease_id,
-                                agent_id=agent_id,
-                                url="about:blank",
-                                title="about:blank",
-                            )
-                            lease.owned_target_ids.append(target_id)
-                            return lease
-
-                        elif requirements.execution_class in (ExecutionClass.CLASS_I, ExecutionClass.CLASS_A):
-                            requires_visual = requirements.requires_visual or requirements.execution_class == ExecutionClass.CLASS_A
-                            process, cdp_url, temp_dir, real_target_id = self._spawn_dedicated_process(
-                                requirements.execution_class,
-                                requires_visual=requires_visual,
-                            )
-
-                            lease = self.lease_manager.create_lease(
-                                agent_id=agent_id,
-                                project_id=project_id,
-                                execution_class=requirements.execution_class,
-                                cdp_url=cdp_url,
-                                timeout_seconds=requirements.timeout_seconds,
-                                auth_identity=requirements.auth_identity,
-                                exclusive_identity=requirements.exclusive_identity,
-                                process_pid=process.pid,
-                                user_data_dir=temp_dir,
-                                pre_reserved_lease_id=temp_lease_id,
-                                browser_instance_id=f"dedicated-{process.pid}",
-                            )
-
-                            self._dedicated_processes[lease.lease_id] = (process, temp_dir)
-                            self._dedicated_processes_data[lease.lease_id] = {"pid": process.pid, "user_data_dir": temp_dir}
-
-                            # Register real target
-                            self.target_registry.register_target(
-                                target_id=real_target_id,
-                                browser_context_id=None,
-                                lease_id=lease.lease_id,
-                                agent_id=agent_id,
-                                url="about:blank",
-                                title="about:blank",
-                            )
-                            lease.owned_target_ids.append(real_target_id)
-                            return lease
-
-                        else:
-                            raise ValueError(f"Unknown execution class: {requirements.execution_class}")
-
-                    except Exception:
-                        # Rollback identity reservation on provisioning failure
+            temp_lease_id = f"lease-{uuid.uuid4().hex[:12]}"
+            try:
+                with self._state_lock():
+                    admitted, reason = self.admission.check_admission(
+                        requirements,
+                        current_active_leases=self.lease_manager.get_active_lease_count(),
+                    )
+                    if admitted:
+                        # 2. Reserve identity before creating Chrome resources (prevent resource leaks)
                         if requirements.auth_identity:
-                            self.lease_manager.rollback_identity(requirements.auth_identity, temp_lease_id)
-                        raise
-                else:
-                    last_reason = reason
+                            self.lease_manager.reserve_identity(
+                                requirements.auth_identity,
+                                requirements.exclusive_identity,
+                                temp_lease_id,
+                            )
+
+                        try:
+                            # 3. Route and provision based on execution class
+                            if requirements.execution_class == ExecutionClass.CLASS_S:
+                                instance_id, cdp_url = self._ensure_class_s_daemon()
+                                ws_url = get_browser_ws_url(cdp_url)
+
+                                context_id = None
+                                try:
+                                    with CDPClient(ws_url) as cdp:
+                                        ctx_res = cdp.request("Target.createBrowserContext")
+                                        context_id = ctx_res["result"]["browserContextId"]
+                                        t_res = cdp.request("Target.createTarget", {"url": "about:blank", "browserContextId": context_id})
+                                        target_id = t_res["result"]["targetId"]
+
+                                    dinfo = self._class_s_daemons[instance_id]
+                                    lease = self.lease_manager.create_lease(
+                                        agent_id=agent_id,
+                                        project_id=project_id,
+                                        execution_class=ExecutionClass.CLASS_S,
+                                        cdp_url=cdp_url,
+                                        timeout_seconds=requirements.timeout_seconds,
+                                        auth_identity=requirements.auth_identity,
+                                        exclusive_identity=requirements.exclusive_identity,
+                                        browser_context_id=context_id,
+                                        process_pid=dinfo.get("pid"),
+                                        user_data_dir=dinfo.get("user_data_dir"),
+                                        pre_reserved_lease_id=temp_lease_id,
+                                        browser_instance_id=instance_id,
+                                    )
+
+                                    # Register initial target
+                                    self.target_registry.register_target(
+                                        target_id=target_id,
+                                        browser_context_id=context_id,
+                                        lease_id=lease.lease_id,
+                                        agent_id=agent_id,
+                                        url="about:blank",
+                                        title="about:blank",
+                                    )
+                                    lease.owned_target_ids.append(target_id)
+                                    return lease
+                                except Exception:
+                                    if context_id:
+                                        try:
+                                            with CDPClient(ws_url) as cdp:
+                                                cdp.request("Target.disposeBrowserContext", {"browserContextId": context_id})
+                                        except Exception:
+                                            pass
+                                    raise
+
+                            elif requirements.execution_class in (ExecutionClass.CLASS_I, ExecutionClass.CLASS_A):
+                                requires_visual = requirements.requires_visual or requirements.execution_class == ExecutionClass.CLASS_A
+                                process, cdp_url, temp_dir, real_target_id = self._spawn_dedicated_process(
+                                    requirements.execution_class,
+                                    requires_visual=requires_visual,
+                                )
+
+                                try:
+                                    lease = self.lease_manager.create_lease(
+                                        agent_id=agent_id,
+                                        project_id=project_id,
+                                        execution_class=requirements.execution_class,
+                                        cdp_url=cdp_url,
+                                        timeout_seconds=requirements.timeout_seconds,
+                                        auth_identity=requirements.auth_identity,
+                                        exclusive_identity=requirements.exclusive_identity,
+                                        process_pid=process.pid,
+                                        user_data_dir=temp_dir,
+                                        pre_reserved_lease_id=temp_lease_id,
+                                        browser_instance_id=f"dedicated-{process.pid}",
+                                    )
+
+                                    self._dedicated_processes[lease.lease_id] = (process, temp_dir)
+                                    self._dedicated_processes_data[lease.lease_id] = {"pid": process.pid, "user_data_dir": temp_dir}
+
+                                    # Register real target
+                                    self.target_registry.register_target(
+                                        target_id=real_target_id,
+                                        browser_context_id=None,
+                                        lease_id=lease.lease_id,
+                                        agent_id=agent_id,
+                                        url="about:blank",
+                                        title="about:blank",
+                                    )
+                                    lease.owned_target_ids.append(real_target_id)
+                                    return lease
+                                except Exception:
+                                    try:
+                                        process.terminate()
+                                        process.wait(timeout=2)
+                                    except Exception:
+                                        try:
+                                            process.kill()
+                                        except Exception:
+                                            pass
+                                    if os.path.exists(temp_dir):
+                                        shutil.rmtree(temp_dir, ignore_errors=True)
+                                    raise
+
+                            else:
+                                raise ValueError(f"Unknown execution class: {requirements.execution_class}")
+
+                        except Exception:
+                            # Rollback identity reservation on provisioning failure
+                            if requirements.auth_identity:
+                                self.lease_manager.rollback_identity(requirements.auth_identity, temp_lease_id)
+                            raise
+                    else:
+                        last_reason = reason
+            except Exception:
+                if requirements.auth_identity:
+                    self.lease_manager.rollback_identity(requirements.auth_identity, temp_lease_id)
+                raise
 
             if time.monotonic() >= deadline:
                 raise AdmissionRejectedError(f"Timed out waiting for admission: {last_reason}")
@@ -678,4 +842,9 @@ class SessionRouter:
 
         with self._state_lock():
             for did in list(self._class_s_daemons.keys()):
-                self._handle_daemon_recycle(did)
+                active_on_daemon = sum(
+                    1 for l in self.lease_manager.get_active_leases()
+                    if l.browser_instance_id == did
+                )
+                if active_on_daemon == 0:
+                    self._handle_daemon_recycle(did)

@@ -58,6 +58,11 @@ class AdmissionRejectedError(OmniBrowserError):
     exit_code = ExitCode.POLICY_BLOCKED
 
 
+class BrokerStateUnavailableError(OmniBrowserError):
+    """Raised when broker control-plane persistence fails or state file cannot be loaded."""
+    exit_code = ExitCode.INTERNAL_ERROR
+
+
 @dataclass(frozen=True, slots=True)
 class DOMNodeRef:
     """An opaque reference valid only for one frame document epoch."""

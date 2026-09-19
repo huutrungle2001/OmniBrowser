@@ -126,19 +126,16 @@ def _legacy_page(args):
         # Priority 1: substring in URL
         for page in context.pages:
             if args.match in page.url:
-                page.bring_to_front()
                 return playwright, browser, context, page
         # Priority 2: title match
         for page in context.pages:
             try:
                 if page.title() and args.match.lower() in page.title().lower():
-                    page.bring_to_front()
                     return playwright, browser, context, page
             except Exception:
                 pass
 
     page = context.pages[0] if context.pages else context.new_page()
-    page.bring_to_front()
     return playwright, browser, context, page
 
 
