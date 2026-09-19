@@ -554,6 +554,81 @@ def cmd_recipe_suggest(args):
     _json(_learning_memory(args).suggest(args.url))
 
 
+def cmd_workflow_plan(args):
+    from browser_core.workflows import StateTransitionGraph, WorkflowComposer
+    store = _recipe_store(args)
+    graph = StateTransitionGraph()
+    graph.ingest_store(store)
+
+    start = args.from_state
+    if start not in graph.states:
+        for sid, s in graph.states.items():
+            if s.route_pattern and (s.route_pattern in start or start in s.route_pattern):
+                start = sid
+                break
+
+    composer = WorkflowComposer(graph)
+    plan = composer.plan(start, args.to_state, max_allowed_risk=args.max_risk)
+    if plan is None:
+        raise ValueError(f"No path found from '{args.from_state}' to '{args.to_state}' within risk limit {args.max_risk}")
+    _json(plan.to_dict())
+    return 0
+
+
+def cmd_workflow_run(args):
+    from browser_core.contracts import WorkflowPlan, TransitionEdge
+    from browser_core.workflows import WorkflowEngine
+
+    raw = args.plan
+    if Path(raw).is_file():
+        with open(raw, "r", encoding="utf-8") as f:
+            plan_data = json.load(f)
+    else:
+        plan_data = json.loads(raw)
+
+    edges = [
+        TransitionEdge(**e) if isinstance(e, dict) else e
+        for e in plan_data.get("edges", [])
+    ]
+    plan = WorkflowPlan(
+        plan_id=plan_data.get("plan_id", f"plan_{uuid4().hex[:8]}"),
+        start_state=plan_data.get("start_state", ""),
+        goal_state=plan_data.get("goal_state", ""),
+        edges=edges,
+        cumulative_risk=plan_data.get("cumulative_risk", "R0"),
+        estimated_steps=plan_data.get("estimated_steps", len(edges)),
+    )
+
+    params = _read_json(args.params, None, {}) or {}
+    if not isinstance(params, dict):
+        raise ValueError("workflow run --params must be a JSON object")
+
+    store = _recipe_store(args)
+    manager, page = _manager_page(args)
+    allow_r4 = bool(getattr(args, "allow_irreversible", False))
+    try:
+        engine = WorkflowEngine(store=store)
+        result = engine.execute(plan, page, params, manager=manager, allow_r4=allow_r4)
+        _json(result.to_dict())
+        return 0 if result.ok else 1
+    finally:
+        manager.close()
+
+
+def cmd_workflow_graph(args):
+    from browser_core.workflows import StateTransitionGraph
+    store = _recipe_store(args)
+    graph = StateTransitionGraph()
+    graph.ingest_store(store)
+    data = graph.to_dict()
+    if getattr(args, "domain", None):
+        domain = args.domain
+        data["states"] = {k: v for k, v in data["states"].items() if v.get("domain") == domain}
+        data["edges"] = {k: [e for e in elist if k in data["states"]] for k, elist in data["edges"].items() if k in data["states"]}
+    _json(data)
+    return 0
+
+
 class _RawCDP:
     """Tiny synchronous CDP transport used to avoid a Node driver for observe."""
 
@@ -867,6 +942,26 @@ def _parser():
     p_suggest = recipe_sub.add_parser("suggest", help="Suggest learned recipes for a URL")
     p_suggest.add_argument("--url", default=None); p_suggest.add_argument("--memory-root", default=None)
 
+    # Workflow commands
+    p_wf = sub.add_parser("workflow", help="Compose and execute multi-step state transition workflows")
+    wf_sub = p_wf.add_subparsers(dest="workflow_command", required=True)
+    p_wf_plan = wf_sub.add_parser("plan", help="Compute lowest-cost workflow plan between states")
+    p_wf_plan.add_argument("--from", dest="from_state", required=True, help="Starting state ID or URL")
+    p_wf_plan.add_argument("--to", dest="to_state", required=True, help="Target state ID")
+    p_wf_plan.add_argument("--max-risk", default="R4", choices=["R0", "R1", "R2", "R3", "R4"], help="Maximum allowable edge risk")
+    p_wf_plan.add_argument("--recipes-dir", default=None, help="Recipe directory (defaults to ./recipes)")
+    p_wf_plan.add_argument("--memory-root", default=None, help="Learning memory root")
+    p_wf_run = wf_sub.add_parser("run", help="Execute a planned workflow across state transitions")
+    p_wf_run.add_argument("plan", help="Workflow plan JSON string or path to plan JSON file")
+    p_wf_run.add_argument("--params", nargs="?", const="{}", default="{}", help="JSON object of parameters")
+    p_wf_run.add_argument("--allow-irreversible", "--allow-r4", dest="allow_irreversible", action="store_true", default=False, help="Allow execution of R4 actions")
+    p_wf_run.add_argument("--recipes-dir", default=None, help="Recipe directory (defaults to ./recipes)")
+    p_wf_run.add_argument("--memory-root", default=None, help="Learning memory root")
+    p_wf_graph = wf_sub.add_parser("graph", help="Dump state transition graph topology")
+    p_wf_graph.add_argument("--domain", default=None, help="Filter states/edges by domain")
+    p_wf_graph.add_argument("--recipes-dir", default=None, help="Recipe directory (defaults to ./recipes)")
+    p_wf_graph.add_argument("--memory-root", default=None, help="Learning memory root")
+
     # Broker commands
     p_broker = sub.add_parser("broker", help="Concurrency and Resource Broker commands")
     broker_sub = p_broker.add_subparsers(dest="broker_command", required=True)
@@ -901,6 +996,8 @@ def main(argv=None):
             return globals()[f"cmd_learn_{args.learn_command}"](args)
         if command == "recipe":
             return globals()[f"cmd_recipe_{args.recipe_command}"](args)
+        if command == "workflow":
+            return globals()[f"cmd_workflow_{args.workflow_command}"](args)
         return globals()[f"cmd_{command.replace('-', '_')}"](args)
     except (OmniBrowserError, TargetNotFoundError, ActionTimeoutError) as error:
         print(str(error), file=sys.stderr)

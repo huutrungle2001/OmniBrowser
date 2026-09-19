@@ -540,6 +540,19 @@ class Recipe:
 
     def __post_init__(self) -> None:
         self.metadata = _defaults(self.metadata)
+        if isinstance(self.matcher, dict):
+            self.matcher = MatcherSpec(
+                required_anchors=list(self.matcher.get("required_anchors", [])),
+                forbidden_anchors=list(self.matcher.get("forbidden_anchors", [])),
+                semantic_fingerprint=dict(self.matcher.get("semantic_fingerprint", {})),
+                min_similarity=float(self.matcher.get("min_similarity", 0.70)),
+            )
+        if isinstance(self.safety, dict):
+            self.safety = SafetySpec(
+                max_risk=str(self.safety.get("max_risk", "R2")),
+                allow_r4=bool(self.safety.get("allow_r4", False)),
+                unknown_effect_policy=str(self.safety.get("unknown_effect_policy", "reconcile")),
+            )
         self.steps = [step if isinstance(step, RecipeStep) else RecipeStep.from_dict(step) for step in self.steps]
         self.validate()
 

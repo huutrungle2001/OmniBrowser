@@ -284,3 +284,69 @@ class HealthStats:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+class WorkflowInterruptedError(RuntimeError):
+    """Raised when a multi-step workflow halts due to an edge or state failure."""
+    pass
+
+
+@dataclass(slots=True)
+class SemanticStateNode:
+    state_id: str
+    domain: str
+    route_pattern: str = ""
+    required_anchors: list[dict[str, Any]] = field(default_factory=list)
+    semantic_fingerprint: dict[str, Any] = field(default_factory=dict)
+    description: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class TransitionEdge:
+    edge_id: str
+    from_state: str
+    to_state: str
+    recipe_id: str
+    risk_class: str = RiskClass.R2_LOCAL_MUTABLE
+    required_params: list[str] = field(default_factory=list)
+    cost: float = 1.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class WorkflowPlan:
+    plan_id: str
+    start_state: str
+    goal_state: str
+    edges: list[TransitionEdge] = field(default_factory=list)
+    cumulative_risk: str = RiskClass.R0_READONLY
+    estimated_steps: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class WorkflowExecutionResult:
+    ok: bool
+    plan_id: str
+    completed_edges: int
+    total_edges: int
+    current_state: str
+    cumulative_risk: str
+    outcome: str = ExecutionOutcome.CONFIRMED_SUCCESS
+    failure_edge: str | None = None
+    message: str = ""
+    edge_results: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+WorkflowSpec = WorkflowPlan
+WorkflowStep = TransitionEdge
