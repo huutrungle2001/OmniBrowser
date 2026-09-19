@@ -183,9 +183,14 @@ def _scan_running_orphan_chrome_pids(runtime_root: Path, active_user_dirs: set[P
                     if token.startswith("--user-data-dir="):
                         udir_str = token.split("=", 1)[1].strip()
                         udir_path = Path(udir_str).resolve()
-                        if str(udir_path).startswith(root_str):
-                            if udir_path not in active_user_dirs:
-                                orphans.append((pid, str(udir_path)))
+                        try:
+                            if udir_path.is_relative_to(runtime_root.resolve()) and udir_path != runtime_root.resolve():
+                                if udir_path not in active_user_dirs:
+                                    orphans.append((pid, str(udir_path)))
+                        except (ValueError, AttributeError):
+                            if str(udir_path).startswith(root_str) and str(udir_path) != root_str:
+                                if udir_path not in active_user_dirs:
+                                    orphans.append((pid, str(udir_path)))
     except Exception:
         pass
     return orphans
@@ -438,6 +443,8 @@ class SessionRouter:
                         self.target_registry.clear_lease_targets(lid)
                 self._class_s_daemons.pop(did, None)
                 self.watchdog.unregister_daemon(did)
+                if pid:
+                    _safe_kill_browser(pid, expected_udir=udir, proc=popen_obj)
                 if udir and os.path.exists(udir):
                     shutil.rmtree(udir, ignore_errors=True)
             else:
@@ -810,6 +817,9 @@ class SessionRouter:
                     self.lease_manager.rollback_identity(requirements.auth_identity, temp_lease_id)
                 self.lease_manager._leases.pop(temp_lease_id, None)
                 self.target_registry.clear_lease_targets(temp_lease_id)
+                self._local_leases.discard(temp_lease_id)
+                self._dedicated_processes.pop(temp_lease_id, None)
+                self._dedicated_processes_data.pop(temp_lease_id, None)
                 if created_context_id and created_cdp_url and is_cdp_alive(created_cdp_url):
                     try:
                         ws_url = get_browser_ws_url(created_cdp_url)
@@ -918,13 +928,13 @@ class SessionRouter:
 
     def shutdown_broker(self) -> None:
         """Global administrative shutdown: releases ALL active leases and recycles all daemons."""
-        active_ids = [l.lease_id for l in self.lease_manager.get_active_leases()]
-        for lid in active_ids:
-            try:
-                self.release_lease(lid)
-            except Exception:
-                pass
-
         with self._state_lock():
+            active_ids = [l.lease_id for l in self.lease_manager.get_active_leases()]
+            for lid in active_ids:
+                try:
+                    self.release_lease(lid)
+                except Exception:
+                    pass
+            self._local_leases.clear()
             for did in list(self._class_s_daemons.keys()):
                 self._handle_daemon_recycle(did)
