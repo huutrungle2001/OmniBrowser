@@ -30,7 +30,7 @@ OmniBrowser is an open-source, deterministic browser automation engine and proce
 * **Dedicated User Profile**: `~/.chrome-ai-profile` (prevents polluting daily user browsing)
 * **Launcher Script**: [launch_chrome.sh](./scripts/launch_chrome.sh)
 * **Main Controller CLI**: [cdp_controller.py](./scripts/cdp_controller.py)
-* **ChatGPT Web Client**: [chatgpt_client.py](./scripts/chatgpt_client.py)
+* **ChatGPT Web Oracle**: [scripts/oracle](./scripts/oracle)
 * **Python Core Library**: `src/browser_core/`
 
 ### Launch Chrome (if not already running)
@@ -122,35 +122,60 @@ For direct multi-file attachment without recipe parameter encoding:
 python3 scripts/cdp_controller.py --match chatgpt upload /path/to/doc1.md /path/to/doc2.yaml
 ```
 
-### 2.6 Dedicated LLM Web Interface Client (`chatgpt_client.py`) & Tab-Isolated Sessions
+### 2.6 Dedicated LLM Web Oracle (`scripts/oracle`) & Tab-Isolated Sessions
 Orchestrates end-to-end consultations on authenticated ChatGPT sessions with strict tab isolation, persistent URLs, and tab teardown:
 
 ```bash
 # List all active consultation sessions and tab states (🟢 OPEN vs ⚪ DETACHED)
-python3 scripts/chatgpt_client.py session list
+./scripts/oracle session list
 
 # Ask within a named persistent session (auto-creates thread URL in chatgpt_sessions.json)
-python3 scripts/chatgpt_client.py session ask my_session "Explain this architecture" \
+./scripts/oracle session ask my_session "Explain this architecture" \
   -f src/browser_core/engine.py doc.md \
   --save-md .tmp/answer.md
 
 # Follow up in the exact same thread without tab collisions or re-explaining context
-python3 scripts/chatgpt_client.py session ask my_session "How to handle race conditions?"
+./scripts/oracle session ask my_session "How to handle race conditions?"
 
 # Close the session browser tab when finished to save RAM and clear tab clutter
-python3 scripts/chatgpt_client.py session close my_session
+./scripts/oracle session close my_session
 
 # One-shot ask and immediate tab close
-python3 scripts/chatgpt_client.py session ask quick_query "Check theorem 2" --close
+./scripts/oracle session ask quick_query "Check theorem 2" --close
 
 # Extract latest pristine markdown answer and code blocks from active tab
-python3 scripts/chatgpt_client.py extract --out /tmp/solution.py --save-md /tmp/answer.md
+./scripts/oracle extract --out /tmp/solution.py --save-md /tmp/answer.md
 
 # Check current logged-in user profile & workspace
-python3 scripts/chatgpt_client.py account
+./scripts/oracle account
 
 # Download all generated DALL-E / generative images
-python3 scripts/chatgpt_client.py download-images --out-dir .tmp/images/
+./scripts/oracle download-images --out-dir .tmp/images/
+```
+
+### 2.7 Multi-Agent Concurrency Broker & Progressive Bulkheading (`broker`, `--lease`)
+Orchestrates concurrent browser leases across multi-agent systems with failure domain isolation, fencing tokens, and profile sanctity (Invariant 9):
+- **Class S (Shared Multi-Context)**: Warm headless daemon with ephemeral isolated BrowserContexts for read-heavy or light tasks.
+- **Class I (Isolated Dedicated Ephemeral)**: Dedicated Chrome process and isolated user-data-dir for untrusted sites or heavy DOM manipulation.
+- **Class A (Authenticated & Interactive)**: Dedicated headful Chrome process with exclusive identity lock for sensitive authenticated accounts.
+
+```bash
+# Check broker subsystems status (active leases, daemons, admission telemetry)
+python3 scripts/cdp_controller.py broker status
+
+# Request a Class S lease (fast warm context)
+python3 scripts/cdp_controller.py broker lease request --class S --agent-id my-agent
+
+# Request an exclusive Class A lease with auth identity
+python3 scripts/cdp_controller.py broker lease request --class A --identity "user@gmail.com" --exclusive
+
+# Execute CLI commands scoped strictly to a lease (scoped tabs and target isolation)
+python3 scripts/cdp_controller.py --lease <lease_id> list-tabs
+python3 scripts/cdp_controller.py --lease <lease_id> observe
+python3 scripts/cdp_controller.py --lease <lease_id> act click <ref>
+
+# Release lease and tear down scoped context/process
+python3 scripts/cdp_controller.py broker lease release <lease_id>
 ```
 
 ---
