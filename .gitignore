@@ -46,7 +46,7 @@ blob-report/
 *.swo
 
 # Runtime results & logs
-results/
+/results/
 
 # Agent Runtime State
 .agents/communication/chatgpt_sessions.json
