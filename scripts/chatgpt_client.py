@@ -39,38 +39,160 @@ def resolve_cdp_url() -> str:
 CDP_URL = resolve_cdp_url()
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
-def get_chatgpt_page(context, target_url: str = None, new_chat: bool = False):
-    """Find or open a ChatGPT page in the context, optionally starting a new chat."""
-    page = None
-    for pg in context.pages:
-        if "chatgpt.com" in pg.url:
-            if target_url and target_url in pg.url:
-                page = pg
-                break
-            if not target_url and page is None:
-                page = pg
+def get_sessions_file() -> Path:
+    """Resolve project-scoped chatgpt_sessions.json file."""
+    if "CHATGPT_SESSIONS_FILE" in os.environ:
+        return Path(os.environ["CHATGPT_SESSIONS_FILE"]).resolve()
+    cwd = Path.cwd()
+    candidate = cwd / ".agents" / "communication" / "chatgpt_sessions.json"
+    if candidate.exists():
+        return candidate
+    docs_threads = cwd / "docs" / "threads.json"
+    if docs_threads.exists():
+        return docs_threads
+    return candidate
 
-    if page is None:
+def load_sessions() -> dict:
+    sf = get_sessions_file()
+    if not sf.exists():
+        return {"sessions": {}}
+    try:
+        with open(sf, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if "sessions" in data and isinstance(data["sessions"], dict):
+                return data
+            elif "active_threads" in data and isinstance(data["active_threads"], list):
+                sessions = {}
+                for t in data["active_threads"]:
+                    key = t.get("agent") or t.get("id") or t.get("role")
+                    sessions[key] = {
+                        "thread_url": t.get("url"),
+                        "title": t.get("purpose") or t.get("role", ""),
+                        "status": "active"
+                    }
+                return {"sessions": sessions}
+            return {"sessions": data}
+    except Exception as e:
+        print(f"⚠️ Error loading sessions file {sf}: {e}", file=sys.stderr)
+        return {"sessions": {}}
+
+def save_sessions(data: dict):
+    sf = get_sessions_file()
+    sf.parent.mkdir(parents=True, exist_ok=True)
+    with open(sf, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+def register_session(session_name: str, thread_url: str, title: str = ""):
+    if not session_name or not thread_url:
+        return
+    data = load_sessions()
+    sessions = data.setdefault("sessions", {})
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    existing = sessions.get(session_name, {})
+    sessions[session_name] = {
+        "thread_url": thread_url,
+        "title": title or existing.get("title", ""),
+        "created_at": existing.get("created_at", now),
+        "last_active": now,
+        "status": "active"
+    }
+    save_sessions(data)
+    print(f"💾 Registered ChatGPT session '{session_name}' -> {thread_url} in {get_sessions_file()}", flush=True)
+
+def close_session(session_name: str) -> bool:
+    data = load_sessions()
+    sessions = data.get("sessions", {})
+    if session_name not in sessions:
+        print(f"❌ Session '{session_name}' not found in registry.", file=sys.stderr)
+        return False
+
+    session = sessions[session_name]
+    thread_url = session.get("thread_url")
+
+    closed_tab = False
+    if thread_url:
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.connect_over_cdp(CDP_URL)
+                context = browser.contexts[0]
+                for pg in context.pages:
+                    if thread_url in pg.url or (pg.url and pg.url in thread_url and len(pg.url) > 25):
+                        print(f"🚪 Closing browser tab for session '{session_name}' ({pg.url})...", flush=True)
+                        pg.close()
+                        closed_tab = True
+                        break
+        except Exception as e:
+            print(f"⚠️ Error closing browser tab: {e}", file=sys.stderr)
+
+    session["status"] = "closed"
+    session["closed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    save_sessions(data)
+    print(f"✅ Session '{session_name}' closed successfully (browser tab closed: {closed_tab}).", flush=True)
+    return True
+
+def cmd_session_list():
+    data = load_sessions()
+    sessions = data.get("sessions", {})
+    sf = get_sessions_file()
+    print(f"\n📂 ChatGPT Sessions Registry ({sf}):")
+    if not sessions:
+        print("  (No active or registered sessions found in this project)\n")
+        return
+
+    open_urls = []
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.connect_over_cdp(CDP_URL)
+            context = browser.contexts[0]
+            open_urls = [pg.url for pg in context.pages]
+    except Exception:
+        pass
+
+    print(f"{'SESSION NAME':<22} | {'STATUS':<8} | {'TAB STATE':<12} | {'THREAD URL'}")
+    print("-" * 95)
+    for name, s in sessions.items():
+        url = s.get("thread_url", "")
+        st = s.get("status", "unknown")
+        is_open = any(url and (url in u or u in url) for u in open_urls)
+        tab_state = "🟢 OPEN" if is_open else "⚪ DETACHED"
+        print(f"{name:<22} | {st:<8} | {tab_state:<12} | {url[:48]}")
+    print("")
+
+def get_chatgpt_page(context, target_url: str = None, new_chat: bool = False, new_tab: bool = False):
+    """Find or open a ChatGPT page in the context, optionally starting a new chat or new tab."""
+    if new_tab or new_chat:
+        print("📑 Opening a dedicated NEW TAB for ChatGPT (preserving existing agent tabs)...", flush=True)
         page = context.new_page()
         page.goto(target_url or "https://chatgpt.com/", wait_until="domcontentloaded", timeout=45000)
-        time.sleep(2)
+        time.sleep(2.5)
         return page
 
-    if new_chat:
-        print("🆕 Starting fresh ChatGPT thread...", flush=True)
-        # If already at root, nothing to do
-        if page.url.rstrip("/") == "https://chatgpt.com":
-            return page
-        new_chat_btn = page.locator("a[data-testid='create-new-chat-button'], a:has-text('New chat')").first
-        if new_chat_btn.count() > 0 and new_chat_btn.is_visible():
-            try:
-                new_chat_btn.click(timeout=2500, force=True)
-                time.sleep(1.5)
-            except Exception:
-                page.goto("https://chatgpt.com/", wait_until="domcontentloaded")
-        else:
-            page.goto("https://chatgpt.com/", wait_until="domcontentloaded")
-        time.sleep(1.5)
+    page = None
+    if target_url:
+        for pg in context.pages:
+            if pg.url == target_url:
+                page = pg
+                break
+        if not page:
+            for pg in context.pages:
+                if target_url in pg.url:
+                    page = pg
+                    break
+    else:
+        # STRICT TAB ISOLATION: Never hijack an active conversation thread (/c/<uuid>)!
+        # Only reuse a tab if it is an idle blank homepage
+        for pg in context.pages:
+            clean_url = pg.url.split("?")[0].rstrip("/")
+            if clean_url == "https://chatgpt.com":
+                page = pg
+                break
+
+    if page is None:
+        print("📑 Opening a dedicated NEW TAB for ChatGPT (preventing cross-project tab collision)...", flush=True)
+        page = context.new_page()
+        page.goto(target_url or "https://chatgpt.com/", wait_until="domcontentloaded", timeout=45000)
+        time.sleep(2.5)
+        return page
 
     return page
 
@@ -129,7 +251,7 @@ def attach_files(page, file_paths: list) -> bool:
         return False
 
     print(f"📎 Attaching {len(resolved_paths)} file(s) to ChatGPT: {[Path(p).name for p in resolved_paths]}...", flush=True)
-    file_input = page.locator("#upload-files, input[type='file']").first
+    file_input = page.locator("input[type='file']").first
     if file_input.count() == 0:
         print("❌ Could not locate file input element in ChatGPT DOM.", file=sys.stderr)
         return False
@@ -218,18 +340,11 @@ def extract_answer_data(page) -> dict:
     """Extract Markdown text, code blocks, and canvas artifacts from the latest assistant turn."""
     markdown_text = ""
     try:
-        copy_btn = page.locator("button[aria-label='Copy response'], button[aria-label*='Copy response'], button[aria-label*='Sao chép câu trả lời'], [data-message-author-role='assistant'] button[data-testid='copy-turn-action-button']").last
+        copy_btn = page.locator("[data-testid='copy-turn-action-button']").last
         if copy_btn.count() > 0:
-            copy_btn.scroll_into_view_if_needed()
             copy_btn.click(timeout=2000, force=True)
-            time.sleep(0.5)
+            time.sleep(0.3)
             markdown_text = page.evaluate("() => navigator.clipboard.readText()")
-            if not markdown_text or not markdown_text.strip():
-                import subprocess
-                if sys.platform == "darwin":
-                    markdown_text = subprocess.check_output(["pbpaste"]).decode("utf-8")
-                elif sys.platform.startswith("linux"):
-                    markdown_text = subprocess.check_output(["xclip", "-selection", "clipboard", "-o"]).decode("utf-8")
     except Exception:
         pass
 
@@ -301,9 +416,21 @@ def execute_chat(
     out_path: str = None,
     out_dir: str = None,
     save_md: str = None,
-    images_dir: str = None
+    images_dir: str = None,
+    session_name: str = None,
+    close_after: bool = False
 ) -> dict:
     """Single-session end-to-end prompt submission, streaming wait, and extraction."""
+    if session_name and not thread_url:
+        sessions_data = load_sessions()
+        sess = sessions_data.get("sessions", {}).get(session_name)
+        if sess and sess.get("thread_url"):
+            thread_url = sess["thread_url"]
+            print(f"🔗 Reusing registered session '{session_name}': {thread_url}", flush=True)
+        else:
+            new_chat = True
+            print(f"🆕 Starting new consultation thread for session '{session_name}'...", flush=True)
+
     print(f"🚀 Connecting to Chrome CDP on {CDP_URL}...", flush=True)
     with sync_playwright() as p:
         try:
@@ -335,15 +462,7 @@ def execute_chat(
                     composer.fill(prompt_text)
                     time.sleep(0.5)
                 except Exception as e:
-                    print(f"⚠️ Direct fill fallback via insertText: {e}", flush=True)
-                    page.evaluate("""(text) => {
-                        const el = document.querySelector("#prompt-textarea, div.ProseMirror");
-                        if (el) {
-                            el.focus();
-                            document.execCommand("insertText", false, text);
-                        }
-                    }""", prompt_text)
-                    time.sleep(0.5)
+                    print(f"⚠️ Direct fill warning: {e}", flush=True)
 
         # Record initial assistant turns
         initial_turns = page.evaluate("""() => {
@@ -353,8 +472,8 @@ def execute_chat(
         # 4. Click send or press Enter (verifying composer clearance)
         send_btn = page.locator("#composer-submit-button, button[data-testid='send-button'], button[aria-label*='Send'], button[aria-label*='Gửi']").first
         
-        # Wait up to 6s for send button to be enabled
-        for _ in range(20):
+        # Wait up to 15s for send button to be enabled (upload processing)
+        for _ in range(50):
             is_disabled = page.evaluate("""() => {
                 const b = document.querySelector("#composer-submit-button, button[data-testid='send-button']");
                 return !b || b.hasAttribute('disabled') || b.getAttribute('aria-disabled') === 'true';
@@ -400,14 +519,17 @@ def execute_chat(
                 break
             time.sleep(0.4)
 
-        # Phase 2: Wait for generation to complete
         start_gen = time.time()
         while time.time() - start_gen < timeout:
-            is_generating = page.evaluate("""() => {
-                const stopBtn = document.querySelector("button[data-testid='stop-button'], button[aria-label*='Stop']");
-                const thinking = document.querySelector("div.result-thinking, .animate-pulse");
-                return Boolean(stopBtn || thinking);
-            }""")
+            try:
+                is_generating = page.evaluate("""() => {
+                    const stopBtn = document.querySelector("button[data-testid='stop-button'], button[aria-label*='Stop']");
+                    const thinking = document.querySelector("div.result-thinking, .animate-pulse");
+                    return Boolean(stopBtn || thinking);
+                }""")
+            except Exception:
+                time.sleep(1.0)
+                continue
 
             if not is_generating:
                 time.sleep(1.0)
@@ -423,9 +545,26 @@ def execute_chat(
         saved_imgs = extract_and_download_images(page, img_target_dir)
         res["images"] = saved_imgs
 
+        # Capture final thread URL & title
+        time.sleep(1.0)
+        final_url = page.url
+        final_title = page.title()
+        res["thread_url"] = final_url
+        res["title"] = final_title
+
+        if session_name and "/c/" in final_url:
+            register_session(session_name, final_url, final_title)
+
         # 8. Save artifacts & log
         save_artifacts(res, out_path=out_path, out_dir=out_dir, save_md=save_md)
         log_consultation(prompt_text or "", file_paths or [], page.url, res)
+
+        if close_after:
+            print(f"🚪 Closing browser tab as requested...", flush=True)
+            if session_name:
+                close_session(session_name)
+            else:
+                page.close()
 
         return res
 
@@ -599,6 +738,37 @@ def main():
     p_chat.add_argument("--out-dir", type=str, default=None, help="Directory to save all code blocks & artifacts")
     p_chat.add_argument("--save-md", type=str, default=None, help="File path to save full response markdown")
     p_chat.add_argument("--images-dir", type=str, default=None, help="Directory to save generated images")
+    p_chat.add_argument("--session", "-s", type=str, default=None, help="Named session (tracks URL in chatgpt_sessions.json, prevents tab theft)")
+    p_chat.add_argument("--close", action="store_true", help="Close the browser tab after completing prompt and extraction")
+
+    # session management
+    p_session = subparsers.add_parser("session", help="Manage named ChatGPT consultation sessions (list, ask, close, register)")
+    p_sess_sub = p_session.add_subparsers(dest="session_command", required=True)
+
+    # session list
+    p_sess_sub.add_parser("list", help="List all registered sessions and their live tab states")
+
+    # session close
+    p_s_close = p_sess_sub.add_parser("close", help="Close a session tab and mark it closed")
+    p_s_close.add_argument("name", type=str, help="Session name")
+
+    # session register
+    p_s_reg = p_sess_sub.add_parser("register", help="Register an existing thread URL under a session name")
+    p_s_reg.add_argument("name", type=str, help="Session name")
+    p_s_reg.add_argument("url", type=str, help="Thread URL (https://chatgpt.com/c/...)")
+    p_s_reg.add_argument("--title", type=str, default="", help="Session description / title")
+
+    # session ask
+    p_s_ask = p_sess_sub.add_parser("ask", help="Send a prompt within a named session")
+    p_s_ask.add_argument("name", type=str, help="Session name")
+    p_s_ask.add_argument("message", type=str, nargs="?", default="", help="Prompt text or @file")
+    p_s_ask.add_argument("--files", "-f", nargs="+", default=[], help="File path(s) to attach")
+    p_s_ask.add_argument("--model", "-m", type=str, default=None, help="Select model")
+    p_s_ask.add_argument("--close", action="store_true", help="Close tab after response")
+    p_s_ask.add_argument("--out", "-o", type=str, default=None, help="File path to save primary code")
+    p_s_ask.add_argument("--out-dir", type=str, default=None, help="Directory to save code blocks & artifacts")
+    p_s_ask.add_argument("--save-md", type=str, default=None, help="File path to save full response markdown")
+    p_s_ask.add_argument("--timeout", type=int, default=180, help="Max wait timeout in seconds")
 
     # new chat
     p_new = subparsers.add_parser("new-chat", help="Start a fresh conversation thread")
@@ -679,7 +849,48 @@ def main():
             log_consultation("extract", [], page.url or "", res)
         return
 
+    if args.command == "session":
+        if args.session_command == "list":
+            cmd_session_list()
+            return
+        elif args.session_command == "close":
+            close_session(args.name)
+            return
+        elif args.session_command == "register":
+            register_session(args.name, args.url, args.title)
+            return
+        elif args.session_command == "ask":
+            if args.message and args.message.startswith("@") and os.path.exists(args.message[1:]):
+                with open(args.message[1:], "r", encoding="utf-8") as f:
+                    args.message = f.read()
+            if not args.message and not args.files:
+                print("❌ Error: Must provide either a message or at least one file to attach.", file=sys.stderr)
+                sys.exit(1)
+            res = execute_chat(
+                prompt_text=args.message,
+                file_paths=args.files,
+                session_name=args.name,
+                model=args.model,
+                close_after=args.close,
+                out_path=args.out,
+                out_dir=args.out_dir,
+                save_md=args.save_md,
+                timeout=args.timeout
+            )
+            print("\n" + "=" * 80)
+            print("🤖 CHATGPT RESPONSE:")
+            print("=" * 80)
+            print(res.get("text", "")[:2000])
+            if len(res.get("text", "")) > 2000:
+                print(f"\n... [{len(res.get('text', '')) - 2000} more characters truncated] ...")
+            print("=" * 80)
+            return
+
     if args.command == "chat":
+        if args.message and args.message.startswith("@") and os.path.exists(args.message[1:]):
+            with open(args.message[1:], "r", encoding="utf-8") as f:
+                args.message = f.read()
+
         if not args.message and not args.files:
             print("❌ Error: Must provide either a message or at least one file to attach.", file=sys.stderr)
             sys.exit(1)
@@ -694,7 +905,9 @@ def main():
             out_path=args.out,
             out_dir=args.out_dir,
             save_md=args.save_md,
-            images_dir=args.images_dir
+            images_dir=args.images_dir,
+            session_name=getattr(args, "session", None),
+            close_after=getattr(args, "close", False)
         )
 
         print("\n" + "=" * 80)

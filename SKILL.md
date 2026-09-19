@@ -102,21 +102,49 @@ Executes declarative fast-paths for recurring workflows without LLM reasoning la
 python3 scripts/cdp_controller.py recipe list
 
 # Inspect recipe specification
-python3 scripts/cdp_controller.py recipe show chatgpt_new_chat
+python3 scripts/cdp_controller.py recipe show chatgpt_upload_files
 
 # Execute recipe against active tab with optional parameter substitutions
 python3 scripts/cdp_controller.py recipe run chatgpt_ask_question --params '{"prompt": "Hello world"}'
+
+# Upload files using procedural recipe
+python3 scripts/cdp_controller.py recipe run chatgpt_upload_files --params '{"files": ["/path/to/doc.pdf", "/path/to/data.yaml"]}'
+
+# Copy latest assistant response to system clipboard (raw pristine markdown)
+python3 scripts/cdp_controller.py recipe run chatgpt_copy_response
 ```
 
-### 2.5 Dedicated LLM Web Interface Client (`chatgpt_client.py`)
-Orchestrates end-to-end consultations on authenticated ChatGPT sessions:
+### 2.5 Native File Upload & Direct Controller Actions
+For direct multi-file attachment without recipe parameter encoding:
 
 ```bash
-# Ask a question (with optional file attachment and new thread flag)
-python3 scripts/chatgpt_client.py chat "Explain this architecture" -f src/browser_core/engine.py -n
+# Directly upload files to #upload-files (input[type=file])
+python3 scripts/cdp_controller.py --match chatgpt upload /path/to/doc1.md /path/to/doc2.yaml
+```
 
-# Extract latest markdown answer and code blocks from active tab
-python3 scripts/chatgpt_client.py extract --out /tmp/solution.py
+### 2.6 Dedicated LLM Web Interface Client (`chatgpt_client.py`) & Tab-Isolated Sessions
+Orchestrates end-to-end consultations on authenticated ChatGPT sessions with strict tab isolation, persistent URLs, and tab teardown:
+
+```bash
+# List all active consultation sessions and tab states (🟢 OPEN vs ⚪ DETACHED)
+python3 scripts/chatgpt_client.py session list
+
+# Ask within a named persistent session (auto-creates thread URL in chatgpt_sessions.json)
+python3 scripts/chatgpt_client.py session ask my_session "Explain this architecture" \
+  -f src/browser_core/engine.py doc.md \
+  --save-md .tmp/answer.md
+
+# Follow up in the exact same thread without tab collisions or re-explaining context
+python3 scripts/chatgpt_client.py session ask my_session "How to handle race conditions?"
+
+# Close the session browser tab when finished to save RAM and clear tab clutter
+python3 scripts/chatgpt_client.py session close my_session
+
+# One-shot ask and immediate tab close
+python3 scripts/chatgpt_client.py session ask quick_query "Check theorem 2" --close
+
+# Extract latest pristine markdown answer and code blocks from active tab
+python3 scripts/chatgpt_client.py extract --out /tmp/solution.py --save-md /tmp/answer.md
 
 # Check current logged-in user profile & workspace
 python3 scripts/chatgpt_client.py account
