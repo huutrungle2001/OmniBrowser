@@ -51,3 +51,4 @@ blob-report/
 # Agent Runtime State
 .agents/communication/chatgpt_sessions.json
 .chatgpt_sessions.json
+recipes/**/sitemaps/
