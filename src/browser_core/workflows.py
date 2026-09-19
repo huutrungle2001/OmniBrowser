@@ -41,6 +41,7 @@ try:
         _domain_from_url,
         _find_anchor_in_tree,
         _normalize_path,
+        get_recipe_risk,
         match_page_state,
     )
 except ImportError:
@@ -69,6 +70,7 @@ except ImportError:
         _domain_from_url,
         _find_anchor_in_tree,
         _normalize_path,
+        get_recipe_risk,
         match_page_state,
     )
 
@@ -173,10 +175,9 @@ class StateTransitionGraph:
             self.ingest_recipe(recipe)
 
     def resolve_live_state(self, page_url: str, tree_nodes: Any) -> SemanticStateNode | None:
-        """Match live page to the most confident semantic state node."""
+        """Match live page to the most confident semantic state node with ambiguity detection."""
         u_domain = _domain_from_url(page_url)
-        best_node = None
-        best_score = 0.0
+        candidates: list[tuple[float, SemanticStateNode]] = []
 
         for state in self.states.values():
             if state.domain and state.domain != u_domain and state.domain != "generic" and "*" not in state.domain:
@@ -198,15 +199,22 @@ class StateTransitionGraph:
                 matcher=matcher_spec,
             )
             res = match_page_state(dummy_recipe, page_url, tree_nodes)
-            if res.get("matched", False) and res.get("score", 0.0) > best_score:
-                best_score = res["score"]
-                best_node = state
+            if res.get("matched", False):
+                candidates.append((float(res.get("score", 0.0)), state))
             elif not state.required_anchors and state.route_pattern and state.route_pattern in page_url:
-                if 0.5 > best_score:
-                    best_score = 0.5
-                    best_node = state
+                candidates.append((0.5, state))
 
-        return best_node
+        if not candidates:
+            return None
+
+        # Sort by descending confidence score
+        candidates.sort(key=lambda item: item[0], reverse=True)
+
+        # Ambiguity detection: If two top candidates have indistinguishable scores (delta < 0.01), fail-closed
+        if len(candidates) > 1 and abs(candidates[0][0] - candidates[1][0]) < 1e-4:
+            return None
+
+        return candidates[0][1]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -225,17 +233,21 @@ class WorkflowComposer:
         self,
         start_state: str,
         goal_state: str,
-        max_allowed_risk: str = RiskClass.R4_IRREVERSIBLE,
+        *,
+        max_allowed_risk: RiskClass = RiskClass.R4_IRREVERSIBLE,
     ) -> WorkflowPlan | None:
-        """Find the lowest-cost path from start_state to goal_state using Dijkstra."""
+        """
+        Find the lowest-cost path from start_state to goal_state using Dijkstra's algorithm.
+        Prunes edges exceeding max_allowed_risk.
+        """
         if start_state not in self.graph.states:
-            raise KeyError(f"Start state not found in graph: {start_state}")
+            raise KeyError(f"Start state '{start_state}' does not exist in graph.")
         if goal_state not in self.graph.states:
-            raise KeyError(f"Goal state not found in graph: {goal_state}")
+            raise KeyError(f"Goal state '{goal_state}' does not exist in graph.")
 
         max_risk_rank = RISK_RANKS.get(max_allowed_risk, 4)
 
-        # Priority queue: (cumulative_cost, current_state, path_edges)
+        # Priority queue entries: (cost, current_state, path_edges)
         queue: list[tuple[float, str, list[TransitionEdge]]] = [(0.0, start_state, [])]
         visited: dict[str, float] = {}
 
@@ -243,10 +255,13 @@ class WorkflowComposer:
             cost, current, path = heapq.heappop(queue)
 
             if current == goal_state:
-                # Path found!
+                # Path found! Compute cumulative risk (maximum risk rank among all edges)
                 cumulative_risk = RiskClass.R0_READONLY
+                max_rank = 0
                 for e in path:
-                    if RISK_RANKS.get(e.risk_class, 0) > RISK_RANKS.get(cumulative_risk, 0):
+                    rank = RISK_RANKS.get(e.risk_class, 0)
+                    if rank > max_rank:
+                        max_rank = rank
                         cumulative_risk = e.risk_class
 
                 return WorkflowPlan(
@@ -305,11 +320,25 @@ class WorkflowEngine:
         """
         Execute a planned workflow edge-by-edge.
         Preserves all Milestone v2.4 invariants:
+        - Canonical risk is re-evaluated from authoritative RecipeStore.
         - R4 authorization cannot be bypassed.
         - UNKNOWN_SIDE_EFFECT halts subsequent execution immediately.
         - State transition is verified after each edge.
         """
         params = dict(params or {})
+
+        # Canonical Re-validation: Do not blindly trust serialized risk metadata in imported plan
+        canonical_max_risk_rank = 0
+        canonical_risk_class = plan.cumulative_risk or RiskClass.R0_READONLY
+        for edge in plan.edges:
+            canonical_recipe = self.store.get(edge.recipe_id) if hasattr(self.store, "get") else None
+            if canonical_recipe is not None:
+                edge.risk_class = get_recipe_risk(canonical_recipe)
+            edge_rank = RISK_RANKS.get(edge.risk_class, 2)
+            if edge_rank > canonical_max_risk_rank:
+                canonical_max_risk_rank = edge_rank
+                canonical_risk_class = edge.risk_class
+        plan.cumulative_risk = canonical_risk_class
 
         # 1. Global R4 Gate Check
         if plan.cumulative_risk == RiskClass.R4_IRREVERSIBLE and not allow_r4:

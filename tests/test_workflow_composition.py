@@ -452,3 +452,108 @@ def test_workflow_cli_commands(tmp_path, capsys):
     assert plan_data["goal_state"] == "auth:welcome"
     assert plan_data["cumulative_risk"] == "R3"
     assert len(plan_data["edges"]) == 1
+
+
+# 10. Hardening Test: Untrusted Serialized Plan Canonical Re-validation
+def test_untrusted_serialized_plan_canonical_revalidation(tmp_path):
+    store = RecipeStore(root=tmp_path / "recipes")
+    canonical_r4_recipe = Recipe(
+        id="purge_all_data",
+        name="Purge All Data",
+        domain_pattern="https://app.example.com/*",
+        steps=[RecipeStep(action="click", target={"name": "Purge"})],
+        safety=SafetySpec(max_risk=RiskClass.R4_IRREVERSIBLE),
+    )
+    store.save(canonical_r4_recipe)
+
+    # Spoofed serialized plan claiming R1_REVERSIBLE_NAV
+    spoofed_plan = WorkflowPlan(
+        plan_id="spoofed-plan",
+        start_state="S0",
+        goal_state="S1",
+        edges=[
+            TransitionEdge(
+                edge_id="e_spoofed",
+                from_state="S0",
+                to_state="S1",
+                recipe_id="purge_all_data",
+                risk_class=RiskClass.R1_REVERSIBLE_NAV,  # Spoofed!
+            )
+        ],
+        cumulative_risk=RiskClass.R1_REVERSIBLE_NAV,  # Spoofed!
+        estimated_steps=1,
+    )
+
+    recipe_engine = MagicMock(spec=RecipeEngine)
+    engine = WorkflowEngine(store=store, recipe_engine=recipe_engine)
+
+    # Must detect canonical R4 and block execution without allow_r4=True
+    with pytest.raises(RiskGateError) as exc_info:
+        engine.execute(spoofed_plan, MagicMock(), manager=MagicMock(), allow_r4=False)
+    assert "contains R4 (irreversible/destructive) edges" in str(exc_info.value)
+    assert spoofed_plan.cumulative_risk == RiskClass.R4_IRREVERSIBLE
+
+
+# 11. Hardening Test: Ambiguous State Resolution Fails Closed
+def test_ambiguous_state_resolution_fails_closed():
+    graph = StateTransitionGraph()
+    # Two states on the same route with identical anchors/scores
+    state_a = SemanticStateNode(
+        state_id="app:settings_tab_a",
+        domain="example.com",
+        route_pattern="/settings",
+        required_anchors=[{"role": "button", "name": "Option"}],
+    )
+    state_b = SemanticStateNode(
+        state_id="app:settings_tab_b",
+        domain="example.com",
+        route_pattern="/settings",
+        required_anchors=[{"role": "button", "name": "Option"}],
+    )
+    graph.add_state(state_a)
+    graph.add_state(state_b)
+
+    tree = [{"role": "button", "name": "Option", "nodeId": 1}]
+    # Both match with equal score -> ambiguous -> must fail closed (return None)
+    resolved = graph.resolve_live_state("https://example.com/settings", tree)
+    assert resolved is None
+
+
+# 12. Hardening Test: UNKNOWN_SIDE_EFFECT Explicitly Guarantees Destructive Edge Not Dispatched
+def test_unknown_side_effect_guarantees_destructive_edge_not_dispatched():
+    graph = StateTransitionGraph()
+    plan = WorkflowPlan(
+        plan_id="plan-with-destructive-tail",
+        start_state="S0",
+        goal_state="S2",
+        edges=[
+            TransitionEdge(edge_id="e01", from_state="S0", to_state="S1", recipe_id="r_nav", risk_class=RiskClass.R1_REVERSIBLE_NAV),
+            TransitionEdge(edge_id="e12_destruct", from_state="S1", to_state="S2", recipe_id="r_purge", risk_class=RiskClass.R4_IRREVERSIBLE),
+        ],
+        cumulative_risk=RiskClass.R4_IRREVERSIBLE,
+        estimated_steps=2,
+    )
+
+    store = MagicMock(spec=RecipeStore)
+    store.get.return_value = None
+    recipe_engine = MagicMock(spec=RecipeEngine)
+    engine = WorkflowEngine(store=store, recipe_engine=recipe_engine, graph=graph)
+
+    # Edge 0 produces UNKNOWN_SIDE_EFFECT
+    res_unknown = RecipeExecutionResult(
+        ok=False,
+        recipe_id="r_nav",
+        completed_steps=1,
+        outcome=ExecutionOutcome.UNKNOWN_SIDE_EFFECT,
+        message="Ambiguous DOM mutation",
+    )
+    recipe_engine.execute.return_value = res_unknown
+
+    # Execute with allow_r4=True to ensure R4 gate is open, but UNKNOWN_SIDE_EFFECT must halt before e12
+    result = engine.execute(plan, MagicMock(), manager=MagicMock(), allow_r4=True)
+    assert result.ok is False
+    assert result.outcome == ExecutionOutcome.UNKNOWN_SIDE_EFFECT
+    # RecipeEngine was called only ONCE (for e01), NEVER for e12_destruct!
+    assert recipe_engine.execute.call_count == 1
+    dispatched_recipe_ids = [call.args[0] for call in recipe_engine.execute.call_args_list]
+    assert "r_purge" not in dispatched_recipe_ids
