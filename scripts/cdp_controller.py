@@ -220,12 +220,30 @@ def _json(value: Any) -> None:
 def cmd_observe(args):
     fast_result = _fast_observe(args)
     if fast_result is not None:
-        _json(fast_result.to_dict())
+        dict_res = fast_result.to_dict()
+        try:
+            from browser_core.recipes import RecipeStore, suggest_for_url
+            store = _recipe_store(args)
+            store.save_sitemap(fast_result.page_url, fast_result.tree)
+            suggested = suggest_for_url(fast_result.page_url, recipe_store=store, memory_root=getattr(args, "memory_root", None))
+            dict_res["suggested_recipes"] = suggested
+        except Exception:
+            pass
+        _json(dict_res)
         return
     manager, page = _manager_page(args)
     try:
         result = manager.observe(page, max_elements=args.max_elements, frame=_frame(manager, page, args.frame))
-        _json(result.to_dict())
+        dict_res = result.to_dict()
+        try:
+            from browser_core.recipes import RecipeStore, suggest_for_url
+            store = _recipe_store(args)
+            store.save_sitemap(result.page_url, result.tree)
+            suggested = suggest_for_url(result.page_url, recipe_store=store, memory_root=getattr(args, "memory_root", None))
+            dict_res["suggested_recipes"] = suggested
+        except Exception:
+            pass
+        _json(dict_res)
     finally:
         manager.close()
 
@@ -386,33 +404,81 @@ def _store_recipes(store, url: str | None = None) -> list[Any]:
     return values
 
 
-def _store_get(store, recipe_id: str) -> Any:
+def _store_get(store, recipe_id: str, memory: Any = None) -> Any:
+    # 1. Path directly
+    p = Path(recipe_id)
+    if p.exists() and p.is_file():
+        from browser_core.recipes import Recipe
+        return Recipe.from_json(p)
+
+    # 2. Store root / recipe_id (or with .json)
+    if hasattr(store, "root"):
+        cand_p = store.root / recipe_id
+        if cand_p.is_file():
+            from browser_core.recipes import Recipe
+            return Recipe.from_json(cand_p)
+        cand_json = store.root / f"{recipe_id}.json"
+        if cand_json.is_file():
+            from browser_core.recipes import Recipe
+            return Recipe.from_json(cand_json)
+
     for name in ("get", "get_recipe", "find"):
         method = getattr(store, name, None)
-        if method is None:
-            continue
-        try:
-            result = method(recipe_id)
-        except (KeyError, LookupError):
-            result = None
-        if result is not None:
-            return result
+        if callable(method):
+            try:
+                result = method(recipe_id)
+            except TypeError:
+                continue
+            if result is not None:
+                return result
     for recipe in _store_recipes(store):
         data = _recipe_value(recipe)
         if data.get("id") == recipe_id:
             return recipe
+
+    # 3. Learning memory candidates
+    if memory is not None:
+        try:
+            candidates = memory.candidates()
+            for cand in candidates:
+                if cand.get("id") == recipe_id:
+                    from browser_core.recipes import Recipe
+                    return Recipe.from_dict(cand)
+        except Exception:
+            pass
+
     raise ValueError(f"Recipe not found: {recipe_id}")
 
 
 def cmd_recipe_list(args):
     store = _recipe_store(args)
     recipes = _store_recipes(store, args.url)
+    domain_filter = getattr(args, "domain", None)
+    if domain_filter:
+        d = domain_filter.lower().strip()
+        filtered = []
+        for recipe in recipes:
+            val = _recipe_value(recipe)
+            dp = val.get("domain_pattern", "")
+            matches = False
+            if isinstance(dp, list):
+                if any(d in str(p).lower() for p in dp):
+                    matches = True
+            elif d in str(dp).lower():
+                matches = True
+            if not matches and getattr(recipe, "matches_url", None):
+                if recipe.matches_url(f"https://{d}/") or recipe.matches_url(f"http://{d}/"):
+                    matches = True
+            if matches:
+                filtered.append(recipe)
+        recipes = filtered
     _json([_recipe_value(recipe) for recipe in recipes])
 
 
 def cmd_recipe_show(args):
     store = _recipe_store(args)
-    _json(_recipe_value(_store_get(store, args.recipe_id)))
+    mem = _learning_memory(args)
+    _json(_recipe_value(_store_get(store, args.recipe_id, mem)))
 
 
 def _recipe_engine(manager, store=None):
@@ -449,7 +515,8 @@ def cmd_recipe_run(args):
     if not isinstance(params, dict):
         raise ValueError("recipe run --params must be a JSON object")
     store = _recipe_store(args)
-    recipe = _store_get(store, args.recipe_id)
+    mem = _learning_memory(args)
+    recipe = _store_get(store, args.recipe_id, mem)
     manager, page = _manager_page(args)
     try:
         result = _execute_recipe(_recipe_engine(manager, store), recipe, page, params)
@@ -738,6 +805,8 @@ def _parser():
     p.add_argument("--max-elements", type=int, default=80)
     p.add_argument("--frame", default=None)
     p.add_argument("--json", action="store_true", default=False, help="Output compact JSON")
+    p.add_argument("--recipes-dir", default=None, help="Recipe directory (defaults to ./recipes)")
+    p.add_argument("--memory-root", default=None, help="Local learned-memory root (defaults to ~/.omnibrowser/memory/v1)")
     p = sub.add_parser("act", help="Execute an action against an opaque DOM ref")
     p.add_argument("--op", "--action", dest="op"); p.add_argument("--ref"); p.add_argument("--value")
     p.add_argument("--expect"); p.add_argument("--json", nargs="?", const=True, default=None); p.add_argument("--file")
@@ -761,14 +830,17 @@ def _parser():
     recipe_sub = p.add_subparsers(dest="recipe_command", required=True)
     p_list = recipe_sub.add_parser("list", help="List available recipes")
     p_list.add_argument("--url", default=None, help="Only list recipes matching this URL")
+    p_list.add_argument("--domain", default=None, help="Only list recipes matching this domain")
     p_list.add_argument("--recipes-dir", default=None, help="Recipe directory (defaults to ./recipes)")
     p_show = recipe_sub.add_parser("show", help="Show recipe steps and health metadata")
     p_show.add_argument("recipe_id")
     p_show.add_argument("--recipes-dir", default=None, help="Recipe directory (defaults to ./recipes)")
+    p_show.add_argument("--memory-root", default=None, help="Learning memory root")
     p_run = recipe_sub.add_parser("run", help="Execute a stored recipe against the active tab")
     p_run.add_argument("recipe_id")
     p_run.add_argument("--params", nargs="?", const="{}", default="{}", help="JSON object of recipe parameters")
     p_run.add_argument("--recipes-dir", default=None, help="Recipe directory (defaults to ./recipes)")
+    p_run.add_argument("--memory-root", default=None, help="Learning memory root")
     p_candidates = recipe_sub.add_parser("candidates", help="List locally learned draft recipes")
     p_candidates.add_argument("--url", default=None); p_candidates.add_argument("--memory-root", default=None)
     p_promote = recipe_sub.add_parser("promote", help="Promote a local learned draft after approval")

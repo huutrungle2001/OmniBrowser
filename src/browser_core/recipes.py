@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import threading
 import time
 from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import urlparse, urlsplit, urlunsplit
@@ -48,6 +49,32 @@ def _safe_url(url: str) -> str:
     parsed = urlsplit(url)
     # Query values frequently carry OAuth codes, session keys, and PII.
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+def _domain_from_url(url: str) -> str:
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme == "about":
+            return f"about:{parsed.path or 'blank'}"
+        domain = parsed.netloc or parsed.path
+        if ":" in domain:
+            domain = domain.split(":")[0]
+        domain = domain.strip().lower()
+        return domain if domain else "generic"
+    except Exception:
+        return "generic"
+
+
+def _normalize_path(url: str) -> str:
+    try:
+        parsed = urlparse(url)
+        path = parsed.path.strip("/")
+        if not path:
+            return "_root"
+        normalized = re.sub(r"[^\w.-]", "_", path)
+        return normalized[:100]
+    except Exception:
+        return "_root"
 
 
 def _safe_json(value: Any, *, name: str = "") -> Any:
@@ -233,6 +260,8 @@ class RecipeStore:
         if not self.root.exists():
             return []
         for path in sorted(self.root.rglob("*.json")):
+            if "sitemaps" in path.parts:
+                continue
             try:
                 recipe = Recipe.from_json(path.read_bytes())
             except (OSError, ValueError, json.JSONDecodeError) as error:
@@ -265,12 +294,67 @@ class RecipeStore:
 
     find_matching = match
 
-    def save(self, recipe: Recipe) -> Path:
-        self.root.mkdir(parents=True, exist_ok=True)
-        path = self.root / f"{recipe.id}.json"
+    def save(self, recipe: Recipe, domain: str | None = None) -> Path:
+        target_domain = domain
+        if not target_domain:
+            if isinstance(recipe.domain_pattern, str) and "*" not in recipe.domain_pattern and "/" not in recipe.domain_pattern and ":" not in recipe.domain_pattern:
+                target_domain = recipe.domain_pattern
+            elif isinstance(recipe.domain_pattern, list) and len(recipe.domain_pattern) == 1 and "*" not in recipe.domain_pattern[0]:
+                target_domain = recipe.domain_pattern[0]
+        if target_domain:
+            save_dir = self.root / target_domain
+        else:
+            save_dir = self.root
+        save_dir.mkdir(parents=True, exist_ok=True)
+        path = save_dir / f"{recipe.id}.json"
         path.write_text(recipe.to_json(), encoding="utf-8")
         self._recipes[recipe.id] = recipe
         return path
+
+    def save_sitemap(self, url: str, observed_nodes: list[Any]) -> Path:
+        domain = _domain_from_url(url)
+        norm_path = _normalize_path(url)
+        sitemaps_dir = self.root / domain / "sitemaps"
+        sitemaps_dir.mkdir(parents=True, exist_ok=True)
+        sitemap_file = sitemaps_dir / f"{norm_path}.json"
+        interactive_items = []
+        for node in observed_nodes:
+            is_interactive = getattr(node, "interactive", None)
+            if is_interactive is None and isinstance(node, dict):
+                is_interactive = node.get("interactive", False)
+            if is_interactive:
+                role = getattr(node, "role", None) or (node.get("role") if isinstance(node, dict) else "")
+                name = getattr(node, "name", None) or (node.get("name") if isinstance(node, dict) else "")
+                ref = str(getattr(node, "ref", None) or (node.get("ref") if isinstance(node, dict) else ""))
+                raw_val = getattr(node, "value", None) or (node.get("value") if isinstance(node, dict) else None)
+                value = sanitize_value(raw_val, sensitive_name=name) if raw_val is not None else None
+                interactive_items.append({
+                    "role": role,
+                    "name": name,
+                    "ref": ref,
+                    "value": value,
+                })
+        data = {
+            "url": _safe_url(url),
+            "domain": domain,
+            "path": urlparse(url).path,
+            "normalized_path": norm_path,
+            "updated_at": time.time(),
+            "interactive_elements": interactive_items,
+        }
+        sitemap_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return sitemap_file
+
+    def get_sitemap(self, url: str) -> dict[str, Any] | None:
+        domain = _domain_from_url(url)
+        norm_path = _normalize_path(url)
+        sitemap_file = self.root / domain / "sitemaps" / f"{norm_path}.json"
+        if sitemap_file.exists():
+            try:
+                return json.loads(sitemap_file.read_text(encoding="utf-8"))
+            except Exception:
+                return None
+        return None
 
     def record_success(self, recipe: Recipe) -> None:
         recipe.metadata["success_count"] = int(recipe.metadata.get("success_count", 0)) + 1
@@ -367,7 +451,14 @@ class AnchorCompiler:
         field_name = str(raw.get("name") or "")
         if field_name:
             candidates.append({"kind": "scoped_css", "selector": f'{raw["tag"]}[name="{field_name}"]', "score": cls._PRIORS["scoped_css"]})
-        return {"candidates": candidates[:6], "context": {"form": _safe_json(str(raw.get("form") or ""), name="form")}}
+        return {
+            "candidates": candidates[:6],
+            "context": {
+                "form": _safe_json(str(raw.get("form") or ""), name="form"),
+                "type": _safe_json(str(raw.get("type") or ""), name="type"),
+                "tag": _safe_json(str(raw.get("tag") or ""), name="tag"),
+            }
+        }
 
     @classmethod
     def resolve(cls, page: Page, target: Any, *, mutating: bool) -> Any:
@@ -459,13 +550,20 @@ class PostconditionWatcher:
 class LearningMemory:
     """Durable, multi-process semantic journal for learned procedural memory."""
 
-    def __init__(self, root: str | Path | None = None):
+    def __init__(self, root: str | Path | None = None, domain: str | None = None):
         self.root = _memory_root(root)
+        self.domain = domain
         self.root.mkdir(parents=True, exist_ok=True)
-        self.candidates_dir = self.root / "candidates"
-        self.candidates_dir.mkdir(exist_ok=True)
-        self.traces_db = self.root / "traces.db"
-        self.ledger_db = self.root / "ledger.db"
+        if domain:
+            self.domain_dir = self.root / domain
+            self.candidates_dir = self.domain_dir / "candidates"
+        else:
+            self.domain_dir = self.root
+            self.candidates_dir = self.root / "candidates"
+        self.domain_dir.mkdir(parents=True, exist_ok=True)
+        self.candidates_dir.mkdir(parents=True, exist_ok=True)
+        self.traces_db = self.domain_dir / "traces.db"
+        self.ledger_db = self.domain_dir / "ledger.db"
         self._init()
 
     def _connection(self, path: Path) -> sqlite3.Connection:
@@ -495,10 +593,13 @@ class LearningMemory:
         if action not in {"fill", "select", "press"}:
             return None
         text = json.dumps(anchor).lower()
-        if _SECRET_KEY.search(text) or _OTP_KEY.search(text):
-            name, sensitivity = ("password", "secret") if "pass" in text else ("verification_code", "secret")
-        elif "email" in text:
+        val_str = str(value)
+        if _SECRET_KEY.search(text) or _OTP_KEY.search(text) or "password" in text:
+            name, sensitivity = ("password", "secret") if ("pass" in text or "secret" in text) else ("verification_code", "secret")
+        elif "email" in text or _EMAIL.search(val_str):
             name, sensitivity = "email", "pii"
+        elif _BEARER.search(val_str) or _JWT.search(val_str):
+            name, sensitivity = "token", "secret"
         else:
             name, sensitivity = "input_value", "runtime"
         return {"$ref": name, "kind": "runtime_param", "sensitivity": sensitivity, "persist_value": False}
@@ -529,32 +630,65 @@ class LearningMemory:
             raise ValueError("cannot distill an empty learning run")
         url = next((event["url"] for event in events if event.get("url")), "")
         recipe_id = f"learned-{uuid4().hex[:12]}"
-        recipe = distill_recipe(recipe_id, str(row[0]), events, domain_pattern=urlsplit(url).netloc or "*",
+        domain_pat = urlsplit(url).netloc or "*"
+        domain = self.domain or (_domain_from_url(url) if url else None)
+        recipe = distill_recipe(recipe_id, str(row[0]), events, domain_pattern=domain_pat,
                                 validation=_safe_json(dict(validation or {}), name="validation"), metadata={"automatic": True, "status": "draft", "run_id": run_id})
+
+        # Save to both local candidate dir and domain-partitioned candidate dir
         path = self.candidates_dir / f"{recipe_id}.json"
         path.write_text(recipe.to_json(), encoding="utf-8")
+        if domain and (self.root / domain / "candidates") != self.candidates_dir:
+            domain_cand = self.root / domain / "candidates"
+            domain_cand.mkdir(parents=True, exist_ok=True)
+            (domain_cand / f"{recipe_id}.json").write_text(recipe.to_json(), encoding="utf-8")
+
         with self._connection(self.ledger_db) as db:
             db.execute("INSERT INTO executions VALUES (?, ?, ?, ?)", (recipe_id, "distilled", time.time(), json.dumps({"run_id": run_id})))
         return {"run_id": run_id, "status": "draft", "candidate_id": recipe_id}
 
     def candidates(self, url: str | None = None) -> list[dict[str, Any]]:
         result = []
-        for path in sorted(self.candidates_dir.glob("*.json")):
-            recipe = Recipe.from_json(path)
-            if url is None or recipe.matches_url(_safe_url(url)):
-                result.append(recipe.to_dict())
+        seen_ids = set()
+        search_dirs = [self.candidates_dir]
+        if self.domain:
+            search_dirs.append(self.root / self.domain / "candidates")
+        if url:
+            u_domain = _domain_from_url(url)
+            search_dirs.append(self.root / u_domain / "candidates")
+        for sub_cand in self.root.glob("*/candidates"):
+            if sub_cand.is_dir():
+                search_dirs.append(sub_cand)
+
+        for cand_dir in set(search_dirs):
+            if not cand_dir.exists():
+                continue
+            for path in sorted(cand_dir.glob("*.json")):
+                if path.stem in seen_ids:
+                    continue
+                try:
+                    recipe = Recipe.from_json(path)
+                except Exception:
+                    continue
+                if url is None or recipe.matches_url(_safe_url(url)):
+                    seen_ids.add(recipe.id)
+                    result.append(recipe.to_dict())
         return result
 
     def promote(self, candidate_id: str, *, approve: bool = False) -> dict[str, Any]:
         if not approve:
             raise ValueError("promotion requires explicit --approve")
-        path = self.candidates_dir / f"{candidate_id}.json"
-        if not path.exists():
+        # Search for candidate in self.candidates_dir and domain subdirectories
+        target_path = None
+        for p in self.root.rglob(f"{candidate_id}.json"):
+            target_path = p
+            break
+        if not target_path or not target_path.exists():
             raise ValueError(f"unknown candidate: {candidate_id}")
-        recipe = Recipe.from_json(path)
+        recipe = Recipe.from_json(target_path)
         recipe.metadata["status"] = "promoted"
         recipe.metadata["promoted_at"] = int(time.time())
-        path.write_text(recipe.to_json(), encoding="utf-8")
+        target_path.write_text(recipe.to_json(), encoding="utf-8")
         with self._connection(self.ledger_db) as db:
             db.execute("INSERT INTO executions VALUES (?, ?, ?, ?)", (candidate_id, "promoted", time.time(), "{}"))
         return {"candidate_id": candidate_id, "status": "promoted"}
@@ -569,7 +703,8 @@ class LearningMemory:
                 if isinstance(target, Mapping):
                     score = max(score, max((float(item.get("score", 0)) for item in target.get("candidates", [])), default=0.0))
             params = sorted({str(step.get("value", {}).get("$ref")) for step in recipe.get("steps", []) if isinstance(step.get("value"), Mapping) and step["value"].get("$ref")})
-            suggestions.append({"candidate_id": recipe["id"], "status": metadata.get("status", "draft"), "confidence": round(score, 2), "required_params": params})
+            confidence = round(score, 2) if score > 0 else (0.95 if metadata.get("status") == "promoted" else 0.88)
+            suggestions.append({"candidate_id": recipe["id"], "status": metadata.get("status", "draft"), "confidence": confidence, "required_params": params})
         return sorted(suggestions, key=lambda item: item["confidence"], reverse=True)
 
 
@@ -700,3 +835,245 @@ class RecipeEngine:
 
 # Friendly aliases used by callers that describe this operation as mining.
 distill = distill_recipe
+
+
+@dataclass
+class FlightJournal:
+    session_id: str
+    domain: str
+    events: list[dict[str, Any]] = field(default_factory=list)
+    initial_url: str = ""
+    last_url: str = ""
+    started_at: float = field(default_factory=time.time)
+
+
+class FlightRecorder:
+    """Implicit zero-effort action flight recorder for autonomous procedural memory."""
+    _active_journals: dict[str, FlightJournal] = {}
+    _lock = threading.Lock()
+
+    @classmethod
+    def get_session_id(cls, page: Any) -> str:
+        session_id = getattr(page, "_omnibrowser_session_id", None)
+        if not session_id:
+            session_id = f"session_{uuid4().hex[:8]}"
+            try:
+                setattr(page, "_omnibrowser_session_id", session_id)
+            except Exception:
+                pass
+        return session_id
+
+    @classmethod
+    def get_journal(cls, page: Any) -> FlightJournal:
+        session_id = cls.get_session_id(page)
+        with cls._lock:
+            if session_id not in cls._active_journals:
+                initial_url = getattr(page, "url", "")
+                domain = _domain_from_url(initial_url)
+                cls._active_journals[session_id] = FlightJournal(
+                    session_id=session_id,
+                    domain=domain,
+                    initial_url=initial_url,
+                    last_url=initial_url,
+                )
+            return cls._active_journals[session_id]
+
+    @classmethod
+    def clear(cls) -> None:
+        with cls._lock:
+            cls._active_journals.clear()
+
+    @classmethod
+    def record_action(
+        cls,
+        page: Any,
+        action: str,
+        dom_ref: Any,
+        handle: Any | None,
+        anchor: dict[str, Any] | None,
+        value: Any,
+        expect: dict[str, Any] | None,
+        initial_url: str,
+        after_url: str,
+        elapsed_ms: int,
+        memory_root: str | Path | None = None,
+    ) -> dict[str, Any] | None:
+        journal = cls.get_journal(page)
+        if not journal.initial_url:
+            journal.initial_url = initial_url
+            journal.domain = _domain_from_url(initial_url)
+
+        if anchor is None and handle is not None:
+            try:
+                anchor = AnchorCompiler.compile_handle(handle)
+            except Exception:
+                anchor = {"candidates": [], "context": {"opaque_ref": str(dom_ref)}}
+
+        sanitized_value = LearningMemory._value_ref(action, value, anchor or {})
+        event = {
+            "seq": len(journal.events) + 1,
+            "action": action,
+            "target": _safe_json(dict(anchor or {}), name="anchor"),
+            "value": sanitized_value,
+            "expect": _safe_json(dict(expect or {}), name="expect"),
+            "url": _safe_url(initial_url),
+            "after_url": _safe_url(after_url),
+            "duration_ms": int(elapsed_ms),
+            "timestamp": time.time(),
+        }
+        journal.events.append(event)
+        journal.last_url = after_url
+
+        # Check for workflow progression / completion boundary
+        boundary_detected = False
+        # 1. URL changed
+        if _safe_url(after_url) != _safe_url(initial_url) and len(journal.events) >= 1:
+            boundary_detected = True
+        # 2. Form submission / multi-step sequence completion
+        elif action == "click" and any(e["action"] in {"fill", "select"} for e in journal.events[:-1]):
+            anchor_str = json.dumps(anchor or {}).lower()
+            if any(kw in anchor_str for kw in ("submit", "login", "sign in", "continue", "save", "search", "next", "confirm")):
+                boundary_detected = True
+            elif expect and (expect.get("url_changed") or expect.get("revision_changed") or expect.get("dom_mutation")):
+                boundary_detected = True
+        # 3. Action count threshold (prevent unbounded sequence growth)
+        elif len(journal.events) >= 8:
+            boundary_detected = True
+
+        if boundary_detected:
+            distilled = cls.distill_journal(journal, memory_root=memory_root)
+            # Reset journal for the next sequence
+            journal.events = []
+            journal.initial_url = after_url
+            journal.domain = _domain_from_url(after_url)
+            return distilled
+        return None
+
+    @classmethod
+    def distill_journal(
+        cls,
+        journal: FlightJournal,
+        memory_root: str | Path | None = None,
+    ) -> dict[str, Any] | None:
+        if not journal.events:
+            return None
+        domain = journal.domain or _domain_from_url(journal.initial_url)
+        recipe_id = f"auto-{domain.replace('.', '-')}-{uuid4().hex[:8]}"
+        path_name = _normalize_path(journal.initial_url)
+        name = f"Auto flow for {domain} ({path_name})"
+
+        try:
+            recipe = distill_recipe(
+                recipe_id=recipe_id,
+                name=name,
+                steps=journal.events,
+                domain_pattern=domain,
+                metadata={
+                    "automatic": True,
+                    "source": "flight_recorder",
+                    "status": "draft",
+                    "created_at": time.time(),
+                    "confidence": 0.88,
+                },
+            )
+            mem_root = _memory_root(memory_root)
+            candidates_dir = mem_root / domain / "candidates"
+            candidates_dir.mkdir(parents=True, exist_ok=True)
+            candidate_path = candidates_dir / f"{recipe_id}.json"
+            candidate_path.write_text(recipe.to_json(), encoding="utf-8")
+
+            ledger_db = mem_root / domain / "ledger.db"
+            with sqlite3.connect(ledger_db, timeout=5) as db:
+                db.execute("CREATE TABLE IF NOT EXISTS executions (candidate_id TEXT, outcome TEXT NOT NULL, recorded_at REAL NOT NULL, details TEXT NOT NULL)")
+                db.execute("INSERT INTO executions VALUES (?, ?, ?, ?)", (recipe_id, "implicit_distilled", time.time(), json.dumps({"session_id": journal.session_id, "steps_count": len(journal.events)})))
+
+            return {
+                "candidate_id": recipe_id,
+                "recipe": recipe.to_dict(),
+                "path": str(candidate_path),
+            }
+        except Exception:
+            return None
+
+
+def suggest_for_url(
+    url: str,
+    recipe_store: RecipeStore | None = None,
+    memory_root: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Match current URL against domain recipes and return ranked candidates with confidence scores."""
+    suggestions: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    # 1. Curated recipes from RecipeStore
+    store = recipe_store or RecipeStore()
+    matching_curated = store.match(url)
+    u_domain = _domain_from_url(url)
+    for r in matching_curated:
+        if r.id in seen_ids:
+            continue
+        # Calculate confidence
+        if isinstance(r.domain_pattern, str) and u_domain in r.domain_pattern:
+            confidence = 0.95
+        elif isinstance(r.domain_pattern, list) and any(u_domain in p for p in r.domain_pattern):
+            confidence = 0.95
+        elif r.domain_pattern == "*":
+            confidence = 0.80
+        else:
+            confidence = 0.90
+
+        # Extract required parameters
+        params = sorted({m.group(1) for m in _TEMPLATE.finditer(json.dumps(r.to_dict()))})
+        if params:
+            param_str = json.dumps({p: f"<{p}>" for p in params})
+            cmd = f"python3 scripts/cdp_controller.py recipe run {r.id} --params '{param_str}'"
+        else:
+            cmd = f"python3 scripts/cdp_controller.py recipe run {r.id}"
+
+        suggestions.append({
+            "recipe_id": r.id,
+            "name": r.name,
+            "confidence": confidence,
+            "command": cmd,
+            "source": "curated",
+            "required_params": params,
+        })
+        seen_ids.add(r.id)
+
+    # 2. Learned recipes from LearningMemory
+    try:
+        mem = LearningMemory(memory_root)
+        candidates = mem.candidates(url)
+        for c in candidates:
+            cid = c.get("id")
+            if not cid or cid in seen_ids:
+                continue
+            meta = c.get("metadata", {})
+            confidence = float(meta.get("confidence", 0.88 if meta.get("source") == "flight_recorder" else 0.85))
+            if meta.get("status") == "promoted":
+                confidence = 0.95
+
+            params = sorted({
+                str(step.get("value", {}).get("$ref"))
+                for step in c.get("steps", [])
+                if isinstance(step.get("value"), Mapping) and step["value"].get("$ref")
+            })
+            if params:
+                param_str = json.dumps({p: f"<{p}>" for p in params})
+                cmd = f"python3 scripts/cdp_controller.py recipe run {cid} --params '{param_str}'"
+            else:
+                cmd = f"python3 scripts/cdp_controller.py recipe run {cid}"
+
+            suggestions.append({
+                "recipe_id": cid,
+                "name": c.get("name", cid),
+                "confidence": round(confidence, 2),
+                "command": cmd,
+                "source": "learned",
+                "required_params": params,
+            })
+            seen_ids.add(cid)
+    except Exception:
+        pass
+
+    return sorted(suggestions, key=lambda item: item["confidence"], reverse=True)

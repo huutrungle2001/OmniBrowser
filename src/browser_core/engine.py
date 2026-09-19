@@ -210,6 +210,25 @@ def act(
             # Learning is advisory.  A transient local DB issue must not make
             # the browser action fail after it has already succeeded.
             pass
+
+    # Implicit flight recording (zero-effort procedural memory)
+    try:
+        from .recipes import FlightRecorder
+        FlightRecorder.record_action(
+            page=page,
+            action=action,
+            dom_ref=dom_ref,
+            handle=handle,
+            anchor=anchor,
+            value=value,
+            expect=expect,
+            initial_url=initial_url,
+            after_url=page.url,
+            elapsed_ms=elapsed,
+            memory_root=memory_root,
+        )
+    except Exception:
+        pass
     return result
 
 

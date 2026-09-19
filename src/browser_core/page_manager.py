@@ -29,9 +29,11 @@ class PageManager:
         test_mode: bool = False,
         context: BrowserContext | None = None,
         browser_context_id: str | None = None,
+        recipe_store: Any = None,
     ):
         self.cdp_url = cdp_url
         self.test_mode = test_mode
+        self.recipe_store = recipe_store
         self.agent_source = agent_source or Path(__file__).parents[2].joinpath("scripts", "dom_agent.js").read_text()
         self._playwright: Playwright | None = None
         self.browser: Browser | None = None
@@ -97,7 +99,7 @@ class PageManager:
             inventory.append({"token": state.token, "url": frame.url, "name": frame.name})
         return inventory
 
-    def observe(self, page: Page, *, max_elements: int = 80, frame=None) -> ObserveResult:
+    def observe(self, page: Page, *, max_elements: int = 80, frame=None, recipe_store: Any = None, memory_root: Any = None) -> ObserveResult:
         frame = frame or page.main_frame
         state = self._frame_state(frame)
         self._bootstrap(frame)
@@ -121,12 +123,21 @@ class PageManager:
             )
             for node in raw["nodes"]
         ]
+        suggested: list[dict[str, Any]] = []
+        try:
+            from .recipes import suggest_for_url
+            store = recipe_store or self.recipe_store
+            suggested = suggest_for_url(page.url, recipe_store=store, memory_root=memory_root)
+        except Exception:
+            pass
+
         return ObserveResult(
             page_url=page.url,
             frame_id=state.token,
             document_epoch=f"d{state.epoch}",
             revision=raw["revision"],
             tree=nodes,
+            suggested_recipes=suggested,
         )
 
     def resolve_ref(self, page: Page, ref: DOMNodeRef) -> bool:

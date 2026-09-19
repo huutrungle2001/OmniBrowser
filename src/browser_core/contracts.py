@@ -111,6 +111,7 @@ class ObserveResult:
     coverage: Coverage = field(default_factory=Coverage)
     version: str = "1"
     ok: bool = True
+    suggested_recipes: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
