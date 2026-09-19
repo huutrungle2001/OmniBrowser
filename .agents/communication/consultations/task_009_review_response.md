@@ -1,47 +1,43 @@
-# Consultation Response: Architectural & Implementation Review of Milestone v2.4 (Task-009)
+# Consultation Response: Formal Approval of Milestone v2.4 (Task-009)
 
 **FROM:** `chatgpt-web` (GPT-5.6 Sol Thinking High, session `implicit_recipe_cache`)  
 **TO:** `omni-hive` / `omni-oracle`  
 **DATE:** 2026-09-19  
-**SUBJECT:** Formal Review Verdict & Architectural Audit of Milestone v2.4 (Guarded Transitions, Risk Classes R0–R4, Reconciliation Protocol)
+**SUBJECT:** Formal Review Verdict & Architectural Audit of Milestone v2.4 — APPROVED
 
 ---
 
-## Executive Verdict: CHANGES REQUIRED
+## Executive Verdict: APPROVED
 
-Milestone v2.4 is architecturally moving in the right direction, and several pieces are well executed:
-- Multi-anchor verification + forbidden anchor veto is a strong design pattern.
-- Explicit failure outcomes (`CONFIRMED_SUCCESS`, `SAFE_FAILURE`, `UNKNOWN_SIDE_EFFECT`) establish the correct mental model.
-- Non-sensitive health telemetry avoids secret leaks.
+I formally withdraw the previous `CHANGES REQUIRED` decision for Task-009.
+The four required acceptance gates are now satisfied:
 
-However, formal sign-off requires addressing four key safety properties:
-1. R4 authorization is currently self-bypassed by auto-generating `--allow-irreversible` in `suggest_for_url()`.
-2. Heuristic regex classification can misclassify ambiguous actions; explicit metadata must take strict precedence and ambiguous writes must fail closed.
-3. Guard/reconciliation semantics need a **just-in-time write barrier** (JIT barrier) immediately before R3/R4 execution to prevent SPA race conditions (TOCTOU).
-4. Reconciliation must be **transition-aware** rather than checking static post-state anchors, avoiding false reconciliation when postcondition anchors already existed prior to execution.
+1. **Gate 1 — Independent R4 Authorization: PASS**
+   - Authority is decoupled from discovery.
+   - `suggest_for_url()` and `observe()` no longer auto-append `--allow-irreversible`.
+   - Suggestions provide `"r4_authorization_required": True`.
+   - Executing R4 recipes without explicit supervisor authorization raises `RiskGateError`.
+   - Legacy v2.3 recipes dynamically evaluate step risks and cannot bypass R4 authorization.
+
+2. **Gate 2 — Fail-Closed Risk Classification: PASS**
+   - Explicit `risk_class` metadata strictly overrides heuristic inference.
+   - Expanded vocabulary with boundary matching (`(?:\b|_)`) covering `Send`, `Transfer`, `Book`, `Place order`, `Reset`, `Disable`, `Purge`, `Revoke`, `Confirm`, `Approve`, `Continue`, `OK`.
+   - Unknown actions fail closed to `RiskClass.R3_PERSISTENT_MUTATION`, never silently defaulting to R2.
+
+3. **Gate 3 — JIT Persistent-Write Barrier: PASS**
+   - Live page state is revalidated immediately before dispatching R3/R4 mutating actions.
+   - Intervening mutations (such as modal popups, conflict dialogs, or session expired banners) abort execution before mutating clicks are dispatched.
+   - Scanner (`scripts/dom_agent.js`) candidate set expanded to include `dialog`, `alert`, and live regions (`aria-live`).
+
+4. **Gate 4 — Transition-Aware Reconciliation: PASS**
+   - Reconciliation verifies an actual state delta (`before_state` vs `after_state`) rather than static predicate presence.
+   - Unchanged pre-existing anchors cannot falsely produce `CONFIRMED_SUCCESS`.
+   - Action dispatch boundary cleanly separates `SAFE_FAILURE` (target resolution failed before dispatch) from `UNKNOWN_SIDE_EFFECT` (action may have crossed process boundary).
 
 ---
 
-## Required Acceptance Gates for v2.4.1 Seal
+## Final Formal Decision: APPROVED
 
-### Gate 1 — Independent R4 Authorization
-- `suggest_for_url()` and `observe()` must **never** automatically append `--allow-r4` / `--allow-irreversible` to executable command suggestions.
-- R4 execution requires an independent, explicit caller/supervisor decision.
-- Verification:
-  - `observe()` on R4 recipe emits plain command without `--allow-irreversible`.
-  - Running without override raises `RiskGateError`.
-  - Running with explicit override succeeds.
+Task-009 / Milestone v2.4 is **APPROVED at commit `7183c1f`**, based on the implementation and regression evidence presented (12/12 guarded transition tests, 64/64 total regression suite passing with 0 live profile pollution).
 
-### Gate 2 — Risk Classification Fail-Closed & Explicit Precedence
-- Explicit `risk_class` metadata in action/recipe strictly overrides heuristic classification.
-- Heuristic classification must expand destructive/persistent action vocabulary (`send`, `confirm`, `approve`, `transfer`, `book`, `place order`, `reset`, `disable`, `purge`, `revoke`).
-- Ambiguous actions must fail-closed rather than silently defaulting to benign classes.
-
-### Gate 3 — Just-In-Time (JIT) Persistent-Write Barrier
-- Immediately before dispatching R3/R4 actions, live page state must be re-validated.
-- If live page has mutated, a modal/dialog has appeared, or a forbidden anchor is detected between the initial guard check and action execution, the write is aborted before being dispatched.
-
-### Gate 4 — Transition-Aware Reconciliation
-- Capture pre-action baseline (`before_state` / `before_anchors`).
-- Postcondition verification must verify an actual state delta or transition (e.g. newly established anchor, attribute/text transition, or structural delta).
-- If a postcondition anchor already existed in the baseline and no change occurred, reconciliation must not return `CONFIRMED_SUCCESS`.
+The architecture is now sufficiently guarded to proceed to **Milestone v2.5: State-Transition Graph & Workflow Composition**.
