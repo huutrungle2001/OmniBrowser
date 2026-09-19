@@ -65,7 +65,7 @@ def test_auth_state_vault_permissions_and_sanctity(temp_broker_dir):
     assert snapshot["cookies"][0]["value"] == "test-cookie-123"
 
     # Check file mode
-    snapshot_file = Path(temp_broker_dir) / "vault" / "github-user" / "v1.json"
+    snapshot_file = vault._get_identity_dir("github-user") / "v1.json"
     file_stat = snapshot_file.stat()
     assert stat.S_IMODE(file_stat.st_mode) == 0o600
 
@@ -560,39 +560,184 @@ def test_auth_state_vault_atomic_and_numeric_sort(temp_broker_dir):
     assert latest["local_storage"]["counter"] == "12"
 
     # Verify latest.json pointer file
-    latest_file = Path(temp_broker_dir) / "vault" / "test-user" / "latest.json"
+    latest_file = vault._get_identity_dir("test-user") / "latest.json"
     assert latest_file.exists()
     assert stat.S_IMODE(latest_file.stat().st_mode) == 0o600
 
 
-def test_inter_process_state_lock_concurrency(temp_broker_dir):
-    """Verifies that concurrent threads/processes acquiring _state_lock on state.lock maintain serializability."""
-    import concurrent.futures
+def _mp_worker(state_dir: str, vault_dir: str, counter_file: str, barrier, iterations: int):
+    barrier.wait()
+    router = SessionRouter(vault_dir=vault_dir, state_dir=state_dir)
+    for _ in range(iterations):
+        with router._state_lock():
+            val = int(Path(counter_file).read_text(encoding="utf-8").strip() or "0")
+            time.sleep(0.001)
+            Path(counter_file).write_text(str(val + 1), encoding="utf-8")
 
+
+def test_inter_process_state_lock_concurrency(temp_broker_dir):
+    """Verifies that independent OS processes acquiring _state_lock on state.lock maintain serializability."""
+    import multiprocessing
+
+    counter_file = Path(temp_broker_dir) / "counter.txt"
+    counter_file.write_text("0", encoding="utf-8")
+
+    num_processes = 4
+    iterations = 15
+    barrier = multiprocessing.Barrier(num_processes)
+
+    processes = []
+    for _ in range(num_processes):
+        p = multiprocessing.Process(
+            target=_mp_worker,
+            args=(
+                str(Path(temp_broker_dir) / "broker"),
+                str(Path(temp_broker_dir) / "vault"),
+                str(counter_file),
+                barrier,
+                iterations,
+            ),
+        )
+        processes.append(p)
+        p.start()
+
+    for p in processes:
+        p.join(timeout=15)
+        assert p.exitcode == 0
+
+    final_val = int(counter_file.read_text(encoding="utf-8").strip())
+    assert final_val == num_processes * iterations
+
+
+def test_revoked_lease_not_resurrected(temp_broker_dir):
+    """Verifies Critical #1 fix: status() on a stale in-memory router does not resurrect a revoked lease on disk."""
+    broker_dir = Path(temp_broker_dir) / "broker"
+    vault_dir = Path(temp_broker_dir) / "vault"
+
+    r1 = SessionRouter(vault_dir=vault_dir, state_dir=broker_dir)
+    r2 = SessionRouter(vault_dir=vault_dir, state_dir=broker_dir)
+
+    # 1. R1 creates Lease 1
+    lease = r1.request_lease(
+        BrowserRequirements(execution_class=ExecutionClass.CLASS_S),
+        agent_id="agent-1",
+        project_id="test",
+    )
+    assert lease.is_active is True
+
+    # 2. R2 revokes Lease 1 on disk
+    r2.release_lease(lease.lease_id)
+    assert r2.lease_manager.get_active_lease_count() == 0
+
+    # 3. R1 calls status() - with authoritative reload, R1 must NOT resurrect Lease 1 on disk
+    status_data = r1.status()
+    assert status_data["active_leases_count"] == 0
+
+    # 4. Verify R2 also still sees 0 active leases
+    status_r2 = r2.status()
+    assert status_r2["active_leases_count"] == 0
+
+    r1.close()
+    r2.close()
+
+
+def test_auth_state_vault_no_identity_collision(temp_broker_dir):
+    """Verifies Critical #3 fix: alice@example.com and aliceexample.com never collide or share snapshots."""
+    vault = AuthStateVault(vault_dir=Path(temp_broker_dir) / "vault")
+
+    v_a = vault.save_snapshot(
+        identity="alice@example.com",
+        cookies=[{"name": "token", "value": "secret-alice-email", "domain": "example.com"}],
+    )
+    v_b = vault.save_snapshot(
+        identity="aliceexample.com",
+        cookies=[{"name": "token", "value": "secret-alice-no-at", "domain": "example.com"}],
+    )
+
+    snap_a = vault.get_latest_snapshot("alice@example.com")
+    snap_b = vault.get_latest_snapshot("aliceexample.com")
+
+    assert snap_a is not None
+    assert snap_b is not None
+    assert snap_a["cookies"][0]["value"] == "secret-alice-email"
+    assert snap_b["cookies"][0]["value"] == "secret-alice-no-at"
+
+    # Distinct directory paths
+    dir_a = vault._get_identity_dir("alice@example.com")
+    dir_b = vault._get_identity_dir("aliceexample.com")
+    assert dir_a != dir_b
+
+
+def test_auth_state_vault_version_gap_no_overwrite(temp_broker_dir):
+    """Verifies that gaps in version numbers (v1, v3) do not cause v3 to be overwritten."""
+    vault = AuthStateVault(vault_dir=Path(temp_broker_dir) / "vault")
+    ident = "gap-user"
+    ident_dir = vault._get_identity_dir(ident)
+
+    # Save v1
+    vault.save_snapshot(ident, cookies=[{"name": "v", "value": "1"}])
+    # Manually create v3.json (simulating gap where v2 was deleted)
+    v3_file = ident_dir / "v3.json"
+    import json
+    v3_file.write_text(json.dumps({"identity": ident, "version": "v3", "cookies": [{"name": "v", "value": "3"}]}), encoding="utf-8")
+
+    # Save next snapshot -> must be v4, NOT v3!
+    v_next = vault.save_snapshot(ident, cookies=[{"name": "v", "value": "4"}])
+    assert v_next == "v4"
+
+    # Verify v3 content was not overwritten
+    v3_data = json.loads(v3_file.read_text(encoding="utf-8"))
+    assert v3_data["cookies"][0]["value"] == "3"
+
+
+def test_admission_capacity_inside_lock(temp_broker_dir):
+    """Verifies that admission capacity limit is strictly enforced inside state lock."""
+    router = SessionRouter(
+        vault_dir=Path(temp_broker_dir) / "vault",
+        state_dir=Path(temp_broker_dir) / "broker",
+        max_concurrent_leases=1,
+    )
+    try:
+        # Lease 1 succeeds
+        l1 = router.request_lease(
+            BrowserRequirements(execution_class=ExecutionClass.CLASS_S, timeout_seconds=1.0),
+            agent_id="a1",
+            project_id="p1",
+        )
+        assert l1.is_active is True
+
+        # Lease 2 with short timeout must fail
+        with pytest.raises(AdmissionRejectedError) as exc_info:
+            router.request_lease(
+                BrowserRequirements(execution_class=ExecutionClass.CLASS_S, timeout_seconds=0.2),
+                agent_id="a2",
+                project_id="p1",
+            )
+        assert "Timed out waiting for admission" in str(exc_info.value)
+    finally:
+        router.close()
+
+
+def test_orphan_reconciler(temp_broker_dir):
+    """Verifies Critical #2 fix: orphaned runtime directories and dead processes are reaped."""
     router = SessionRouter(
         vault_dir=Path(temp_broker_dir) / "vault",
         state_dir=Path(temp_broker_dir) / "broker",
     )
-
-    counter = 0
-    num_workers = 10
-    iterations = 20
-
-    def worker():
-        nonlocal counter
-        for _ in range(iterations):
-            with router._state_lock():
-                current = counter
-                time.sleep(0.001)  # Simulate brief I/O work
-                counter = current + 1
-
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-            futures = [executor.submit(worker) for _ in range(num_workers)]
-            for f in futures:
-                f.result()
+        dummy_orphan = router.runtime_root / "omnibrowser_orphan_dummy"
+        dummy_orphan.mkdir(parents=True, exist_ok=True)
+        # Set old mtime (> 70s ago)
+        old_time = time.time() - 75.0
+        os.utime(dummy_orphan, (old_time, old_time))
 
-        assert counter == num_workers * iterations
+        assert dummy_orphan.exists()
+
+        # Reconcile orphans
+        router._reconcile_orphans()
+
+        assert not dummy_orphan.exists()
     finally:
         router.close()
+
 

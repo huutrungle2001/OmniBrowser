@@ -133,6 +133,7 @@ class LeaseManager:
         process_pid: int | None = None,
         user_data_dir: str | None = None,
         pre_reserved_lease_id: str | None = None,
+        browser_instance_id: str | None = None,
     ) -> Lease:
         with self._lock:
             lease_id = pre_reserved_lease_id or f"lease-{uuid.uuid4().hex[:12]}"
@@ -142,9 +143,24 @@ class LeaseManager:
             now = time.time()
             expires_at = now + timeout_seconds
 
-            # If not pre-reserved, reserve identity now
-            if auth_identity and not pre_reserved_lease_id:
-                self.reserve_identity(auth_identity, exclusive_identity, lease_id)
+            # If pre-reserved, validate that reservation is still valid, unexpired, and matches identity/mode
+            if auth_identity:
+                if pre_reserved_lease_id:
+                    record = self._active_identities.get(auth_identity)
+                    if not record or not self._is_lease_active(pre_reserved_lease_id, record, now):
+                        raise IdentityConflictError(
+                            f"Pending reservation {pre_reserved_lease_id!r} for {auth_identity!r} has expired or was revoked."
+                        )
+                    if exclusive_identity and record.exclusive_lease_id != pre_reserved_lease_id:
+                        raise IdentityConflictError(
+                            f"Pending reservation {pre_reserved_lease_id!r} does not hold exclusive lock for {auth_identity!r}."
+                        )
+                    if not exclusive_identity and pre_reserved_lease_id not in record.shared_lease_ids:
+                        raise IdentityConflictError(
+                            f"Pending reservation {pre_reserved_lease_id!r} is not in shared locks for {auth_identity!r}."
+                        )
+                else:
+                    self.reserve_identity(auth_identity, exclusive_identity, lease_id)
 
             lease = Lease(
                 lease_id=lease_id,
@@ -160,6 +176,7 @@ class LeaseManager:
                 is_active=True,
                 process_pid=process_pid,
                 user_data_dir=user_data_dir,
+                browser_instance_id=browser_instance_id,
             )
 
             self._leases[lease_id] = lease

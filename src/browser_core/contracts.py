@@ -192,6 +192,7 @@ class Lease:
     is_active: bool = True
     process_pid: int | None = None
     user_data_dir: str | None = None
+    browser_instance_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -1,0 +1,24 @@
+{
+  "id": "unitemps_candidate_documents",
+  "name": "Navigate to Candidate Documents on Unitemps",
+  "description": "Click candidate documents navigation to view and manage uploaded CVs.",
+  "domain_pattern": [
+    "https://portal.unitemps.com/*"
+  ],
+  "steps": [
+    {
+      "action": "click",
+      "target": "a:has-text('Candidate Dashboard'), a[href*='documents']"
+    }
+  ],
+  "validation": {
+    "text_present": "Document"
+  },
+  "metadata": {
+    "version": "1.0",
+    "success_count": 0,
+    "failure_count": 0,
+    "last_failure_reason": null,
+    "failure_ledger": []
+  }
+}

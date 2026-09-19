@@ -1,0 +1,24 @@
+{
+  "id": "unitemps_search_warwick_jobs",
+  "name": "Navigate to Warwick Branch Job Search on Unitemps",
+  "description": "Trigger search for open vacancies in University of Warwick branch.",
+  "domain_pattern": [
+    "https://portal.unitemps.com/*"
+  ],
+  "steps": [
+    {
+      "action": "click",
+      "target": "input[value='Search'], button[type='submit'], #btnSearch"
+    }
+  ],
+  "validation": {
+    "text_present": "Title"
+  },
+  "metadata": {
+    "version": "1.0",
+    "success_count": 0,
+    "failure_count": 0,
+    "last_failure_reason": null,
+    "failure_ledger": []
+  }
+}

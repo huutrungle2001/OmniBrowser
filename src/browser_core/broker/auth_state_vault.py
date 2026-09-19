@@ -8,6 +8,7 @@ Snapshots are stored with strict permissions (chmod 600) and versioned immutably
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -40,10 +41,11 @@ class AuthStateVault:
             pass
 
     def _get_identity_dir(self, identity: str) -> Path:
-        clean_identity = "".join(c for c in identity if c.isalnum() or c in ("-", "_", ".")).strip()
-        if not clean_identity:
+        if not identity or not identity.strip():
             raise ValueError(f"Invalid auth identity: {identity!r}")
-        identity_dir = self.vault_dir / clean_identity
+        # Collision-free directory naming using SHA-256
+        ident_hash = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+        identity_dir = self.vault_dir / f"id_{ident_hash}"
         self.assert_not_protected_profile(identity_dir)
         identity_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -70,17 +72,17 @@ class AuthStateVault:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
 
-            # Count existing versions numerically to create monotonic version tag
-            existing = sorted(
-                identity_dir.glob("v*.json"),
-                key=lambda p: int(p.stem[1:]) if p.stem[1:].isdigit() else 0,
-            )
-            next_ver = len(existing) + 1
+            # Monotonic numeric version calculation (gap-safe: max + 1)
+            numeric_versions = [
+                int(p.stem[1:]) for p in identity_dir.glob("v*.json") if p.stem[1:].isdigit()
+            ]
+            next_ver = max(numeric_versions, default=0) + 1
             version_str = f"v{next_ver}"
             snapshot_file = identity_dir / f"{version_str}.json"
 
             snapshot_data = {
                 "identity": identity,
+                "canonical_identity": identity,
                 "version": version_str,
                 "created_at": timestamp,
                 "cookies": cookies or [],
@@ -127,29 +129,27 @@ class AuthStateVault:
     def get_snapshot(self, identity: str, version: str | None = None) -> dict[str, Any] | None:
         """Get snapshot data for an identity and optional version (defaults to latest)."""
         identity_dir = self._get_identity_dir(identity)
+        numeric_files = sorted(
+            [p for p in identity_dir.glob("v*.json") if p.stem[1:].isdigit()],
+            key=lambda p: int(p.stem[1:]),
+        )
+        if not numeric_files:
+            return None
+
         if version is None:
+            # Reconcile latest pointer against actual disk snapshots
+            target_file = numeric_files[-1]
             latest_file = identity_dir / "latest.json"
-            if not latest_file.exists():
-                # Try finding highest numbered version
-                versions = sorted(
-                    identity_dir.glob("v*.json"),
-                    key=lambda p: int(p.stem[1:]) if p.stem[1:].isdigit() else 0,
-                )
-                if not versions:
-                    return None
-                target_file = versions[-1]
-            else:
+            if latest_file.exists():
                 try:
                     data = json.loads(latest_file.read_text(encoding="utf-8"))
-                    target_file = identity_dir / f"{data['latest']}.json"
+                    pointer_file = identity_dir / f"{data['latest']}.json"
+                    if pointer_file.exists():
+                        # Only use pointer if it's not behind the highest numbered version
+                        if int(pointer_file.stem[1:]) >= int(target_file.stem[1:]):
+                            target_file = pointer_file
                 except Exception:
-                    versions = sorted(
-                        identity_dir.glob("v*.json"),
-                        key=lambda p: int(p.stem[1:]) if p.stem[1:].isdigit() else 0,
-                    )
-                    if not versions:
-                        return None
-                    target_file = versions[-1]
+                    pass
         else:
             target_file = identity_dir / f"{version}.json"
 
@@ -157,7 +157,11 @@ class AuthStateVault:
             return None
 
         try:
-            return json.loads(target_file.read_text(encoding="utf-8"))
+            data = json.loads(target_file.read_text(encoding="utf-8"))
+            # Fail closed against cross-identity data leakage
+            if data.get("identity") != identity and data.get("canonical_identity") != identity:
+                return None
+            return data
         except Exception:
             return None
 
@@ -169,17 +173,23 @@ class AuthStateVault:
         """List all available snapshots, optionally filtered by identity."""
         results = []
         if identity:
-            clean_identity = "".join(c for c in identity if c.isalnum() or c in ("-", "_", ".")).strip()
-            identity_dirs = [self.vault_dir / clean_identity] if (self.vault_dir / clean_identity).exists() else []
+            ident_dir = self._get_identity_dir(identity)
+            identity_dirs = [ident_dir] if ident_dir.exists() else []
         else:
             identity_dirs = [d for d in self.vault_dir.iterdir() if d.is_dir() and not d.name.startswith(".")]
 
         for id_dir in identity_dirs:
-            for s_file in sorted(id_dir.glob("v*.json"), key=lambda p: int(p.stem[1:]) if p.stem[1:].isdigit() else 0):
+            numeric_files = sorted(
+                [p for p in id_dir.glob("v*.json") if p.stem[1:].isdigit()],
+                key=lambda p: int(p.stem[1:]),
+            )
+            for s_file in numeric_files:
                 try:
                     data = json.loads(s_file.read_text(encoding="utf-8"))
+                    if identity and data.get("identity") != identity and data.get("canonical_identity") != identity:
+                        continue
                     results.append({
-                        "identity": data.get("identity", id_dir.name),
+                        "identity": data.get("canonical_identity") or data.get("identity", id_dir.name),
                         "version": data.get("version", s_file.stem),
                         "created_at": data.get("created_at", 0),
                         "cookie_count": len(data.get("cookies", [])),

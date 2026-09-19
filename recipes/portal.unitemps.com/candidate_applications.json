@@ -1,0 +1,24 @@
+{
+  "id": "unitemps_candidate_applications",
+  "name": "Navigate to Candidate Applications on Unitemps",
+  "description": "Click 'Your applications' link in candidate nav to monitor active application statuses.",
+  "domain_pattern": [
+    "https://portal.unitemps.com/*"
+  ],
+  "steps": [
+    {
+      "action": "click",
+      "target": "a:has-text('Your applications'), a[href*='applications']"
+    }
+  ],
+  "validation": {
+    "text_present": "Your applications"
+  },
+  "metadata": {
+    "version": "1.0",
+    "success_count": 0,
+    "failure_count": 0,
+    "last_failure_reason": null,
+    "failure_ledger": []
+  }
+}

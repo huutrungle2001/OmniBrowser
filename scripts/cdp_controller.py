@@ -123,16 +123,19 @@ def _legacy_page(args):
         context = browser.contexts[0] if browser.contexts else browser.new_context()
 
     if getattr(args, "match", None):
-        # First priority: exact URL or exact title
+        # Priority 1: substring in URL
         for page in context.pages:
-            if page.url == args.match or page.title() == args.match:
+            if args.match in page.url:
                 page.bring_to_front()
                 return playwright, browser, context, page
-        # Second priority: substring in URL or title
+        # Priority 2: title match
         for page in context.pages:
-            if args.match in page.url or (page.title() and args.match.lower() in page.title().lower()):
-                page.bring_to_front()
-                return playwright, browser, context, page
+            try:
+                if page.title() and args.match.lower() in page.title().lower():
+                    page.bring_to_front()
+                    return playwright, browser, context, page
+            except Exception:
+                pass
 
     page = context.pages[0] if context.pages else context.new_page()
     page.bring_to_front()
@@ -192,9 +195,17 @@ def _manager_page(args):
     page = manager.primary_page()
     if getattr(args, "match", None) and manager.context:
         for p in manager.context.pages:
-            if args.match in p.url or args.match in p.title():
+            if args.match in p.url:
                 page = p
                 break
+        else:
+            for p in manager.context.pages:
+                try:
+                    if args.match in p.title():
+                        page = p
+                        break
+                except Exception:
+                    pass
     manager.install_scanner(page)
     return manager, page
 
