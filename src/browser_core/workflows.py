@@ -227,6 +227,62 @@ class StateTransitionGraph:
 
         return candidates[0][1]
 
+    def find_alternate_path(
+        self,
+        start_state_id: str,
+        end_state_id: str,
+        excluded_edge_ids: set[str] | None = None,
+        *,
+        excluded_edges: set[str] | list[str] | None = None,
+        max_allowed_risk: str | None = None,
+    ) -> list[TransitionEdge] | None:
+        """
+        Find an alternate lowest-cost path from start_state_id to end_state_id
+        using Dijkstra's algorithm, pruning any edges in excluded_edge_ids.
+        """
+        if start_state_id not in self.states or end_state_id not in self.states:
+            return None
+
+        if start_state_id == end_state_id:
+            return []
+
+        excluded = set(excluded_edge_ids or set())
+        if excluded_edges:
+            excluded.update(excluded_edges)
+
+        max_risk_rank = RISK_RANKS.get(max_allowed_risk, 4) if max_allowed_risk else 4
+
+        # Priority queue entries: (cost, current_state, path_edges)
+        queue: list[tuple[float, str, list[TransitionEdge]]] = [(0.0, start_state_id, [])]
+        visited: dict[str, float] = {}
+
+        while queue:
+            cost, current, path = heapq.heappop(queue)
+
+            if current == end_state_id and path:
+                return path
+
+            if current in visited and visited[current] <= cost:
+                continue
+            visited[current] = cost
+
+            for edge in self.get_outgoing_edges(current):
+                edge_id = getattr(edge, "edge_id", None) or getattr(edge, "id", None)
+                if edge_id in excluded or getattr(edge, "id", None) in excluded or getattr(edge, "edge_id", None) in excluded:
+                    continue
+
+                edge_risk_rank = RISK_RANKS.get(edge.risk_class, 2)
+                if edge_risk_rank > max_risk_rank:
+                    continue
+
+                next_cost = cost + edge.cost
+                if edge.to_state in visited and visited[edge.to_state] <= next_cost:
+                    continue
+
+                heapq.heappush(queue, (next_cost, edge.to_state, path + [edge]))
+
+        return None
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "states": {sid: s.to_dict() for sid, s in self.states.items()},
@@ -325,6 +381,7 @@ class WorkflowEngine:
         *,
         manager: PageManager,
         allow_r4: bool = False,
+        allow_detour: bool = True,
         raise_on_unknown_effect: bool = False,
         raise_on_failure: bool = False,
     ) -> WorkflowExecutionResult:
@@ -422,8 +479,66 @@ class WorkflowEngine:
                     edge_results=edge_results,
                 )
 
-            # 5. Halt on standard SAFE_FAILURE
+            # 5. Halt on standard SAFE_FAILURE (or attempt Alternate Transition Discovery)
             if not edge_res.ok:
+                if allow_detour:
+                    excluded = {edge.edge_id, getattr(edge, "id", edge.edge_id)}
+                    goal = getattr(plan, "final_state", getattr(plan, "goal_state", None))
+                    detour = self.graph.find_alternate_path(edge.from_state, goal, excluded_edge_ids=excluded)
+                    if detour:
+                        detour_failed = False
+                        for d_idx, d_edge in enumerate(detour):
+                            d_canonical = self.store.get(d_edge.recipe_id) if hasattr(self.store, "get") else None
+                            if d_canonical is not None and hasattr(d_canonical, "lifecycle") and d_canonical.lifecycle.state == RecipeLifecycleState.QUARANTINED:
+                                detour_failed = True
+                                break
+                            if d_edge.risk_class == RiskClass.R4_IRREVERSIBLE and not allow_r4:
+                                detour_failed = True
+                                break
+
+                            d_res = self.recipe_engine.execute(
+                                d_edge.recipe_id,
+                                page,
+                                params,
+                                manager=manager,
+                                allow_r4=allow_r4,
+                            )
+                            d_record = {
+                                "edge_index": len(edge_results),
+                                "edge_id": d_edge.edge_id,
+                                "from_state": d_edge.from_state,
+                                "to_state": d_edge.to_state,
+                                "recipe_id": d_edge.recipe_id,
+                                "risk_class": d_edge.risk_class,
+                                "ok": d_res.ok,
+                                "outcome": d_res.outcome,
+                                "reconciled": d_res.reconciled,
+                                "message": d_res.message,
+                                "detour": True,
+                            }
+                            edge_results.append(d_record)
+
+                            if not d_res.ok:
+                                detour_failed = True
+                                break
+
+                            current_state = d_edge.to_state
+
+                        if not detour_failed:
+                            return WorkflowExecutionResult(
+                                ok=True,
+                                plan_id=plan.plan_id,
+                                completed_edges=len(edge_results),
+                                total_edges=len(plan.edges) + len(detour) - 1,
+                                current_state=current_state,
+                                cumulative_risk=plan.cumulative_risk,
+                                outcome=ExecutionOutcome.CONFIRMED_SUCCESS,
+                                failure_edge=None,
+                                message=f"Workflow completed successfully via alternate detour route ({len(detour)} detour edges).",
+                                edge_results=edge_results,
+                                detour_taken=True,
+                            )
+
                 msg = f"Workflow failed on edge {idx} ('{edge.edge_id}'): {edge_res.message}"
                 if raise_on_failure:
                     raise WorkflowInterruptedError(msg)

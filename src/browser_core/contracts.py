@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from enum import IntEnum
 import re
-from typing import Any
+from typing import Any, Mapping
+from uuid import uuid4
 
 
 _REF_PATTERN = re.compile(r"^f(?P<frame>[A-Za-z0-9_-]+)\.d(?P<epoch>[A-Za-z0-9_-]+)\.n(?P<node>[A-Za-z0-9_-]+)$")
@@ -61,6 +63,16 @@ class AdmissionRejectedError(OmniBrowserError):
 class BrokerStateUnavailableError(OmniBrowserError):
     """Raised when broker control-plane persistence fails or state file cannot be loaded."""
     exit_code = ExitCode.INTERNAL_ERROR
+
+
+class AnchorNotFound(OmniBrowserError, Exception):
+    """Raised when an anchor or all candidates in an AnchorBundle cannot be found."""
+    exit_code = ExitCode.TARGET_NOT_FOUND
+
+
+class AnchorAmbiguous(OmniBrowserError, ValueError):
+    """Raised when an anchor candidate matches more than one live element."""
+    exit_code = ExitCode.INVALID_INPUT
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +251,111 @@ class UnknownSideEffectError(RuntimeError):
 
 
 @dataclass(slots=True)
+class AnchorCandidate:
+    kind: str
+    selector: str | None = None
+    role: str | None = None
+    name: str | None = None
+    score: float = 0.80
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "kind": self.kind,
+            "score": self.score,
+        }
+        if self.selector is not None:
+            d["selector"] = self.selector
+        if self.role is not None:
+            d["role"] = self.role
+        if self.name is not None:
+            d["name"] = self.name
+        return d
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "AnchorCandidate":
+        if isinstance(data, cls):
+            return data
+        kind = str(data.get("kind", "scoped_css"))
+        selector = data.get("selector")
+        role = data.get("role")
+        name = data.get("name", data.get("label"))
+        score = float(data.get("score", 0.80))
+        return cls(
+            kind=kind,
+            selector=str(selector) if selector is not None else None,
+            role=str(role) if role is not None else None,
+            name=str(name) if name is not None else None,
+            score=score,
+        )
+
+
+@dataclass(slots=True)
+class AnchorBundle:
+    candidates: list[AnchorCandidate] = field(default_factory=list)
+    fallback_action: str = "fail"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "candidates": [c.to_dict() if hasattr(c, "to_dict") else dict(c) for c in self.candidates],
+            "fallback_action": self.fallback_action,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "AnchorBundle":
+        if isinstance(data, cls):
+            return data
+        candidates_raw = data.get("candidates", [])
+        candidates = [AnchorCandidate.from_dict(c) for c in candidates_raw]
+        fallback_action = str(data.get("fallback_action", "fail"))
+        return cls(candidates=candidates, fallback_action=fallback_action)
+
+    def __len__(self) -> int:
+        return len(self.candidates)
+
+    def __bool__(self) -> bool:
+        return len(self.candidates) > 0
+
+
+@dataclass(slots=True)
+class RepairCandidate:
+    recipe_id: str = ""
+    step_index: int = 0
+    broken_candidate: dict[str, Any] = field(default_factory=dict)
+    healed_candidate: dict[str, Any] = field(default_factory=dict)
+    confidence: float = 0.0
+    id: str = field(default_factory=lambda: uuid4().hex[:12])
+    context: dict[str, Any] = field(default_factory=dict)
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "recipe_id": self.recipe_id,
+            "step_index": self.step_index,
+            "broken_candidate": self.broken_candidate,
+            "healed_candidate": self.healed_candidate,
+            "confidence": self.confidence,
+            "context": self.context,
+            "timestamp": self.timestamp,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "RepairCandidate":
+        if isinstance(data, cls):
+            return data
+        return cls(
+            id=str(data.get("id", uuid4().hex[:12])),
+            recipe_id=str(data.get("recipe_id", "")),
+            step_index=int(data.get("step_index", 0)),
+            broken_candidate=dict(data.get("broken_candidate", {})),
+            healed_candidate=dict(data.get("healed_candidate", {})),
+            confidence=float(data.get("confidence", 0.0)),
+            context=dict(data.get("context", {})),
+            timestamp=str(data.get("timestamp", datetime.now(timezone.utc).isoformat())),
+        )
+
+
+@dataclass(slots=True)
 class SemanticAnchor:
     role: str = ""
     name: str = ""
@@ -314,6 +431,10 @@ class TransitionEdge:
     required_params: list[str] = field(default_factory=list)
     cost: float = 1.0
 
+    @property
+    def id(self) -> str:
+        return self.edge_id
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -326,6 +447,14 @@ class WorkflowPlan:
     edges: list[TransitionEdge] = field(default_factory=list)
     cumulative_risk: str = RiskClass.R0_READONLY
     estimated_steps: int = 0
+
+    @property
+    def final_state(self) -> str:
+        return self.goal_state
+
+    @property
+    def target_state(self) -> str:
+        return self.goal_state
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -343,6 +472,7 @@ class WorkflowExecutionResult:
     failure_edge: str | None = None
     message: str = ""
     edge_results: list[dict[str, Any]] = field(default_factory=list)
+    detour_taken: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

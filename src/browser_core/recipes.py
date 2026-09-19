@@ -27,6 +27,10 @@ from uuid import uuid4
 from playwright.sync_api import Page
 
 from .contracts import (
+    AnchorAmbiguous,
+    AnchorBundle,
+    AnchorCandidate,
+    AnchorNotFound,
     CASConflictError,
     DOMNodeRef,
     ExecutionOutcome,
@@ -38,6 +42,7 @@ from .contracts import (
     PromotionPolicy,
     QuarantinedRecipeError,
     RecipeLifecycleState,
+    RepairCandidate,
     RiskClass,
     RiskGateError,
     SafetySpec,
@@ -68,10 +73,6 @@ _PERSISTENT_REGEX = re.compile(
     re.I,
 )
 _NAV_REGEX = re.compile(r"\b(tab|nav|link|menu|expand|collapse|filter|page|next|prev|breadcrumb|accordion)\b", re.I)
-
-
-class AnchorAmbiguous(ValueError):
-    """A mutating recipe step resolved to more than one live element."""
 
 
 class InvalidExecutableArtifact(ValueError):
@@ -466,6 +467,18 @@ def _substitute(value: Any, params: Mapping[str, Any]) -> Any:
         return _TEMPLATE.sub(lambda m: str(params[m.group(1)]) if m.group(1) in params else m.group(0), value)
     if isinstance(value, list):
         return [_substitute(item, params) for item in value]
+    if isinstance(value, AnchorBundle):
+        new_candidates = []
+        for c in value.candidates:
+            new_c = AnchorCandidate(
+                kind=c.kind,
+                selector=_substitute(c.selector, params) if c.selector else None,
+                role=_substitute(c.role, params) if c.role else None,
+                name=_substitute(c.name, params) if c.name else None,
+                score=c.score,
+            )
+            new_candidates.append(new_c)
+        return AnchorBundle(candidates=new_candidates, fallback_action=value.fallback_action)
     if isinstance(value, dict):
         if set(value) >= {"$ref"}:
             ref = str(value["$ref"])
@@ -478,7 +491,7 @@ def _substitute(value: Any, params: Mapping[str, Any]) -> Any:
 @dataclass(slots=True)
 class RecipeStep:
     action: str
-    target: Any = None
+    target: str | AnchorBundle | dict[str, Any] | None = None
     value: Any = None
     expect: dict[str, Any] = field(default_factory=dict)
     timeout_ms: int = 5000
@@ -488,6 +501,8 @@ class RecipeStep:
     def __post_init__(self) -> None:
         if self.target is None and self.selector is not None:
             self.target = self.selector
+        elif isinstance(self.target, dict) and ("candidates" in self.target or "kind" in self.target):
+            self.target = AnchorBundle.from_dict(self.target)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "RecipeStep":
@@ -495,6 +510,10 @@ class RecipeStep:
         if not action:
             raise ValueError("Recipe step requires action")
         target = data.get("target", data.get("selector", data.get("ref")))
+        if isinstance(target, dict) and ("candidates" in target or "kind" in target):
+            target = AnchorBundle.from_dict(target)
+        elif isinstance(target, AnchorBundle):
+            target = target
         expect = data.get("expect", {})
         if expect is None:
             expect = {}
@@ -509,7 +528,10 @@ class RecipeStep:
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {"action": self.action}
         if self.target is not None:
-            result["target"] = self.target
+            if hasattr(self.target, "to_dict"):
+                result["target"] = self.target.to_dict()
+            else:
+                result["target"] = self.target
         if self.value is not None:
             result["value"] = self.value
         if self.expect:
@@ -958,6 +980,7 @@ class RecipeStore:
 
     def __init__(self, root: str | Path = "recipes"):
         self.root = Path(root)
+        self.repair_log = self.root / ".repairs.jsonl"
         self._recipes: dict[str, Recipe] = {}
 
     def load(self) -> list[Recipe]:
@@ -1335,6 +1358,111 @@ class RecipeStore:
                 recipe.lifecycle.quarantined_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             recipe.lifecycle.utility_score = calculate_utility_score(recipe)
 
+    def record_repair_candidate(self, repair: RepairCandidate) -> None:
+        """Persist a dynamic healing event to the append-only repair log."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        with open(self.repair_log, "a", encoding="utf-8") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                payload = repair.to_dict() if hasattr(repair, "to_dict") else dict(repair)
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                f.flush()
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+    def list_repair_candidates(self, recipe_id: str | None = None) -> list[RepairCandidate]:
+        """List recorded repair candidates, optionally filtered by recipe_id."""
+        if not self.repair_log.exists():
+            return []
+        candidates: list[RepairCandidate] = []
+        with open(self.repair_log, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    cand = RepairCandidate.from_dict(data)
+                    if recipe_id is None or cand.recipe_id == recipe_id:
+                        candidates.append(cand)
+                except Exception:
+                    continue
+        return candidates
+
+    get_repair_candidates = list_repair_candidates
+
+    def apply_repair_candidate(
+        self,
+        repair_id: str,
+        actor: str = "offline_learner",
+        reason: str = "self_healing_promotion",
+    ) -> Recipe:
+        """Apply an approved repair candidate, promoting the healed candidate and incrementing generation."""
+        candidates = self.list_repair_candidates()
+        matched = [c for c in candidates if c.id == repair_id]
+        if not matched:
+            raise ValueError(f"Repair candidate not found: {repair_id}")
+        repair = matched[-1]
+
+        recipe = self.get(repair.recipe_id)
+        if recipe is None:
+            raise ValueError(f"Recipe not found: {repair.recipe_id}")
+
+        if repair.step_index >= len(recipe.steps):
+            raise IndexError(
+                f"Repair step index {repair.step_index} out of range (recipe has {len(recipe.steps)} steps)"
+            )
+
+        step = recipe.steps[repair.step_index]
+        target = step.target
+        healed_cand = AnchorCandidate.from_dict(repair.healed_candidate)
+        h_dict = healed_cand.to_dict()
+
+        if isinstance(target, AnchorBundle):
+            new_candidates = [healed_cand]
+            for c in target.candidates:
+                c_dict = c.to_dict() if hasattr(c, "to_dict") else dict(c)
+                if c_dict.get("kind") == h_dict.get("kind") and (
+                    c_dict.get("selector") == h_dict.get("selector")
+                    and c_dict.get("role") == h_dict.get("role")
+                    and c_dict.get("name") == h_dict.get("name")
+                ):
+                    continue
+                new_candidates.append(c)
+            step.target = AnchorBundle(candidates=new_candidates, fallback_action=target.fallback_action)
+        elif isinstance(target, dict) and "candidates" in target:
+            bundle = AnchorBundle.from_dict(target)
+            new_candidates = [healed_cand]
+            for c in bundle.candidates:
+                c_dict = c.to_dict() if hasattr(c, "to_dict") else dict(c)
+                if c_dict.get("kind") == h_dict.get("kind") and (
+                    c_dict.get("selector") == h_dict.get("selector")
+                    and c_dict.get("role") == h_dict.get("role")
+                    and c_dict.get("name") == h_dict.get("name")
+                ):
+                    continue
+                new_candidates.append(c)
+            step.target = AnchorBundle(candidates=new_candidates, fallback_action=bundle.fallback_action)
+        else:
+            broken_cand = (
+                AnchorCandidate.from_dict(repair.broken_candidate)
+                if repair.broken_candidate
+                else AnchorCandidate(kind="scoped_css", selector=str(target))
+            )
+            step.target = AnchorBundle(candidates=[healed_cand, broken_cand])
+
+        if hasattr(recipe, "lifecycle") and recipe.lifecycle is not None:
+            recipe.lifecycle.audit_log.append({
+                "action": "apply_repair",
+                "repair_id": repair_id,
+                "actor": actor,
+                "reason": reason,
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            })
+
+        self.save(recipe)
+        return recipe
+
 
 
 @dataclass(slots=True)
@@ -1475,6 +1603,97 @@ class AnchorCompiler:
         if ambiguous and mutating:
             raise AnchorAmbiguous("Recipe anchor matched multiple elements; explicit ordinal intent is required")
         raise ValueError("Recipe anchor did not resolve to exactly one element")
+
+
+class AnchorResolver:
+    """Resolves multi-candidate AnchorBundles with dynamic scoring and ambiguity safety."""
+
+    @classmethod
+    def resolve(
+        cls,
+        page: Page,
+        target: str | AnchorBundle | dict[str, Any],
+        mutating: bool = True,
+    ) -> tuple[Any, AnchorCandidate | None, float]:
+        if isinstance(target, str):
+            locator = page.locator(target)
+            count = locator.count()
+            if count == 0:
+                raise AnchorNotFound(f"Target selector not found: {target}")
+            if count > 1:
+                raise AnchorAmbiguous(f"Target selector is ambiguous ({count} matches): {target}")
+            return locator, None, 1.0
+
+        if isinstance(target, dict) and not isinstance(target, AnchorBundle):
+            if "candidates" in target:
+                bundle = AnchorBundle.from_dict(target)
+            elif "selector" in target:
+                bundle = AnchorBundle(candidates=[
+                    AnchorCandidate(
+                        kind=str(target.get("kind", "scoped_css")),
+                        selector=target["selector"],
+                        score=float(target.get("score", 0.80)),
+                    )
+                ])
+            elif "role" in target and "name" in target:
+                bundle = AnchorBundle(candidates=[
+                    AnchorCandidate(
+                        kind="role_name",
+                        role=target["role"],
+                        name=target["name"],
+                        score=float(target.get("score", 0.90)),
+                    )
+                ])
+            else:
+                bundle = AnchorBundle.from_dict(target)
+        elif isinstance(target, AnchorBundle):
+            bundle = target
+        else:
+            raise AnchorNotFound(f"Unsupported target type: {type(target)}")
+
+        candidates = sorted(bundle.candidates, key=lambda c: getattr(c, "score", 0.80), reverse=True)
+        for candidate in candidates:
+            try:
+                kind = candidate.kind
+                if kind in ("test_attr", "scoped_css", "neighborhood"):
+                    if not candidate.selector:
+                        continue
+                    locator = page.locator(candidate.selector)
+                elif kind == "role_name":
+                    if not candidate.role:
+                        continue
+                    if candidate.name:
+                        locator = page.get_by_role(candidate.role, name=candidate.name)
+                    else:
+                        locator = page.get_by_role(candidate.role)
+                elif kind == "label_input":
+                    if not candidate.name:
+                        continue
+                    locator = page.get_by_label(candidate.name)
+                elif kind == "text":
+                    if not candidate.name:
+                        continue
+                    locator = page.get_by_text(candidate.name, exact=True)
+                else:
+                    if candidate.selector:
+                        locator = page.locator(candidate.selector)
+                    elif candidate.name:
+                        locator = page.get_by_text(candidate.name, exact=True)
+                    else:
+                        continue
+
+                n = locator.count()
+                if n == 0:
+                    continue
+                if n > 1:
+                    # Disqualified as ambiguous! Never click .first() for mutating steps
+                    continue
+                return locator, candidate, float(candidate.score)
+            except Exception:
+                continue
+
+        raise AnchorNotFound("All candidates in AnchorBundle failed or were ambiguous")
+
 
 
 class PostconditionWatcher:
@@ -1822,7 +2041,28 @@ class RecipeEngine:
                     if step_risk in {RiskClass.R3_PERSISTENT_MUTATION, RiskClass.R4_IRREVERSIBLE}:
                         persistent_mutation_started = True
 
-                self._execute_step(page, page_manager, step.action, target, value, expect, timeout, on_action_dispatched=mark_mutation_started)
+                step_res = self._execute_step(page, page_manager, step.action, target, value, expect, timeout, on_action_dispatched=mark_mutation_started)
+                loc, resolved_cand, cand_score = step_res if step_res is not None else (None, None, 1.0)
+
+                is_bundle = isinstance(target, AnchorBundle) or (isinstance(target, dict) and "candidates" in target)
+                bundle_obj = target if isinstance(target, AnchorBundle) else (AnchorBundle.from_dict(target) if is_bundle else None)
+                if bundle_obj and bundle_obj.candidates and resolved_cand is not None:
+                    primary_cand = bundle_obj.candidates[0]
+                    p_dict = primary_cand.to_dict() if hasattr(primary_cand, "to_dict") else dict(primary_cand)
+                    r_dict = resolved_cand.to_dict() if hasattr(resolved_cand, "to_dict") else dict(resolved_cand)
+                    if p_dict != r_dict:
+                        import sys
+                        print(f"[HEALED] Step {index}: {resolved_cand.kind} fallback (conf: {cand_score:.2f})", file=sys.stderr)
+                        repair = RepairCandidate(
+                            recipe_id=recipe.id if hasattr(recipe, "id") else str(recipe),
+                            step_index=index,
+                            broken_candidate=p_dict,
+                            healed_candidate=r_dict,
+                            confidence=cand_score,
+                            context={"action": step.action, "url": page.url},
+                        )
+                        if self.store is not None and hasattr(self.store, "record_repair_candidate"):
+                            self.store.record_repair_candidate(repair)
 
 
             # Postcondition Phase
@@ -1941,12 +2181,12 @@ class RecipeEngine:
 
     @staticmethod
     def _execute_step(page: Page, manager: PageManager | None, action: str, target: Any, value: Any,
-                      expect: dict[str, Any], timeout: int, on_action_dispatched: Any = None) -> None:
+                      expect: dict[str, Any], timeout: int, on_action_dispatched: Any = None) -> tuple[Any, AnchorCandidate | None, float]:
         if action == "eval":
             if on_action_dispatched:
                 on_action_dispatched()
             page.evaluate(str(value))
-            return
+            return None, None, 1.0
         if target is None:
             raise ValueError(f"{action} requires target")
         if manager is not None:
@@ -1961,9 +2201,19 @@ class RecipeEngine:
                 if on_action_dispatched:
                     on_action_dispatched()
                 act(page, native, ref, None if value is None else str(value), {**expect, "timeout_ms": timeout}, manager=manager)
-                return
+                return None, None, 1.0
         initial_url = page.url
-        locator = AnchorCompiler.resolve(page, target, mutating=action in {"click", "fill", "select", "upload"})
+        resolved_cand = None
+        score = 1.0
+        try:
+            locator, resolved_cand, score = AnchorResolver.resolve(
+                page, target, mutating=action in {"click", "fill", "select", "upload"}
+            )
+        except (AnchorNotFound, AnchorAmbiguous):
+            raise
+        except Exception:
+            locator = AnchorCompiler.resolve(page, target, mutating=action in {"click", "fill", "select", "upload"})
+
         if on_action_dispatched:
             on_action_dispatched()
         if action == "click":
@@ -1988,6 +2238,7 @@ class RecipeEngine:
         else:
             raise ValueError(f"Unsupported recipe action: {action}")
         PostconditionWatcher.wait(page, locator, expect, timeout, initial_url=initial_url)
+        return locator, resolved_cand, score
 
     @staticmethod
     def _check_expectation(page: Page, locator: Any, expect: Mapping[str, Any]) -> None:

@@ -633,6 +633,33 @@ def cmd_recipe_suggest(args):
     _json(_learning_memory(args).suggest(args.url))
 
 
+def cmd_recipe_repair(args):
+    action = args.repair_command
+    store = _recipe_store(args)
+    if action == "list":
+        candidates = store.list_repair_candidates(args.recipe_id)
+        _json([c.to_dict() for c in candidates])
+        return 0
+    elif action == "inspect":
+        candidates = store.list_repair_candidates()
+        matched = [c for c in candidates if c.id == args.candidate_id]
+        if not matched:
+            raise ValueError(f"Repair candidate not found: {args.candidate_id}")
+        _json(matched[-1].to_dict())
+        return 0
+    elif action == "apply":
+        recipe = store.apply_repair_candidate(args.candidate_id, actor=args.actor, reason=args.reason)
+        _json({
+            "status": "applied",
+            "recipe_id": recipe.id,
+            "revision": recipe.lifecycle.revision,
+            "generation": recipe.lifecycle.generation,
+            "content_digest": recipe.lifecycle.content_digest,
+        })
+        return 0
+    raise ValueError(f"Unknown repair action: {action}")
+
+
 def cmd_workflow_plan(args):
     from browser_core.workflows import StateTransitionGraph, WorkflowComposer
     store = _recipe_store(args)
@@ -1036,6 +1063,19 @@ def _parser():
     p_lifecycle.add_argument("--recipes-dir", default=None, help="Recipe directory (defaults to ./recipes)")
     p_suggest = recipe_sub.add_parser("suggest", help="Suggest learned recipes for a URL")
     p_suggest.add_argument("--url", default=None); p_suggest.add_argument("--memory-root", default=None)
+    p_repair = recipe_sub.add_parser("repair", help="Manage self-healing repair candidates")
+    repair_sub = p_repair.add_subparsers(dest="repair_command", required=True)
+    p_rep_list = repair_sub.add_parser("list", help="List recorded repair candidates")
+    p_rep_list.add_argument("--recipe-id", default=None, help="Filter by recipe ID")
+    p_rep_list.add_argument("--recipes-dir", default=None, help="Recipe directory (defaults to ./recipes)")
+    p_rep_inspect = repair_sub.add_parser("inspect", help="Inspect details of a repair candidate")
+    p_rep_inspect.add_argument("candidate_id", help="Repair candidate ID to inspect")
+    p_rep_inspect.add_argument("--recipes-dir", default=None, help="Recipe directory (defaults to ./recipes)")
+    p_rep_apply = repair_sub.add_parser("apply", help="Apply a repair candidate to its recipe")
+    p_rep_apply.add_argument("candidate_id", help="Repair candidate ID to apply")
+    p_rep_apply.add_argument("--actor", default="offline_learner", help="Actor applying the repair")
+    p_rep_apply.add_argument("--reason", default="self_healing_promotion", help="Reason for applying the repair")
+    p_rep_apply.add_argument("--recipes-dir", default=None, help="Recipe directory (defaults to ./recipes)")
 
     # Workflow commands
     p_wf = sub.add_parser("workflow", help="Compose and execute multi-step state transition workflows")
