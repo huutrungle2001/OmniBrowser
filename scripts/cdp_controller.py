@@ -50,8 +50,14 @@ def _is_loopback_host(hostname: str | None) -> bool:
 def _legacy_context_and_page(browser, url_substring=None):
     context = browser.contexts[0] if browser.contexts else browser.new_context()
     if url_substring:
+        # First priority: exact URL or exact title
         for page in context.pages:
-            if url_substring in page.url:
+            if page.url == url_substring or page.title() == url_substring:
+                page.bring_to_front()
+                return context, page
+        # Second priority: substring in URL or title
+        for page in context.pages:
+            if url_substring in page.url or (page.title() and url_substring.lower() in page.title().lower()):
                 page.bring_to_front()
                 return context, page
     page = context.pages[0] if context.pages else context.new_page()
@@ -59,26 +65,77 @@ def _legacy_context_and_page(browser, url_substring=None):
     return context, page
 
 
+def _resolve_lease(args):
+    """If --lease / --session is provided, validates lease and returns (router, lease, cdp_url, context_id)."""
+    lease_id = getattr(args, "lease", None)
+    if not lease_id:
+        return None, None, args.cdp_url, None
+    from browser_core.broker.session_router import SessionRouter
+    router = SessionRouter()
+    fencing_token = getattr(args, "fencing_token", None)
+    lease = router.lease_manager.validate_lease(lease_id, fencing_token)
+    return router, lease, lease.cdp_url, lease.browser_context_id
+
+
 def cmd_list_tabs(args):
+    router, lease, cdp_url, context_id = _resolve_lease(args)
+    if lease:
+        print(f"\nConnected to Chrome CDP ({cdp_url})")
+        print(f"Active Lease: {lease.lease_id} (Class {lease.execution_class}, Token #{lease.fencing_token})")
+        targets = router.target_registry.get_targets_for_lease(lease.lease_id)
+        print(f"Total open tabs: {len(targets)}\n")
+        print(f"{'INDEX':<6} | {'TITLE':<40} | {'URL'}")
+        print("-" * 90)
+        for i, target in enumerate(targets):
+            title = target.title or "about:blank"
+            url = target.url or "about:blank"
+            print(f"{i:<6} | {title[:38]:<40} | {url[:50]}")
+        return
+
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
-        browser = p.chromium.connect_over_cdp(args.cdp_url)
+        browser = p.chromium.connect_over_cdp(cdp_url)
         context = browser.contexts[0] if browser.contexts else browser.new_context()
-        print(f"\nConnected to Chrome CDP ({args.cdp_url})")
-        print(f"Total open tabs: {len(context.pages)}\n")
+
+        pages = context.pages
+        print(f"\nConnected to Chrome CDP ({cdp_url})")
+        print(f"Total open tabs: {len(pages)}\n")
         print(f"{'INDEX':<6} | {'TITLE':<40} | {'URL'}")
         print("-" * 90)
-        for i, page in enumerate(context.pages):
+        for i, page in enumerate(pages):
             print(f"{i:<6} | {page.title()[:38]:<40} | {page.url[:50]}")
 
 
 def _legacy_page(args):
     from playwright.sync_api import sync_playwright
 
+    router, lease, cdp_url, context_id = _resolve_lease(args)
     playwright = sync_playwright().start()
-    browser = playwright.chromium.connect_over_cdp(args.cdp_url)
-    context, page = _legacy_context_and_page(browser, args.match)
+    browser = playwright.chromium.connect_over_cdp(cdp_url)
+    context = None
+    if context_id:
+        for ctx in browser.contexts:
+            if getattr(ctx, "_browser_context_id", None) == context_id:
+                context = ctx
+                break
+    if not context:
+        context = browser.contexts[0] if browser.contexts else browser.new_context()
+
+    if getattr(args, "match", None):
+        # First priority: exact URL or exact title
+        for page in context.pages:
+            if page.url == args.match or page.title() == args.match:
+                page.bring_to_front()
+                return playwright, browser, context, page
+        # Second priority: substring in URL or title
+        for page in context.pages:
+            if args.match in page.url or (page.title() and args.match.lower() in page.title().lower()):
+                page.bring_to_front()
+                return playwright, browser, context, page
+
+    page = context.pages[0] if context.pages else context.new_page()
+    page.bring_to_front()
     return playwright, browser, context, page
 
 
@@ -126,11 +183,11 @@ def cmd_upload(args):
         playwright.stop()
 
 
-
 def _manager_page(args):
     from browser_core.page_manager import PageManager
 
-    manager = PageManager(args.cdp_url)
+    router, lease, cdp_url, context_id = _resolve_lease(args)
+    manager = PageManager(cdp_url, browser_context_id=context_id)
     manager.connect()
     page = manager.primary_page()
     if getattr(args, "match", None) and manager.context:
@@ -567,7 +624,7 @@ def _fast_observe(args) -> ObserveResult | None:
     The Playwright implementation remains the fallback for matched tabs and
     frame-scoped observations, preserving the full feature path.
     """
-    if getattr(args, "match", None) or getattr(args, "frame", None):
+    if getattr(args, "match", None) or getattr(args, "frame", None) or getattr(args, "lease", None):
         return None
     try:
         parsed = urlsplit(args.cdp_url)
@@ -623,10 +680,42 @@ def _fast_observe(args) -> ObserveResult | None:
         return None
 
 
+def cmd_broker_lease_request(args):
+    from browser_core.broker.session_router import SessionRouter
+    from browser_core.contracts import BrowserRequirements
+
+    router = SessionRouter()
+    req = BrowserRequirements(
+        execution_class=args.exec_class,
+        auth_identity=args.auth,
+        requires_visual=args.visual,
+        timeout_seconds=args.timeout,
+    )
+    lease = router.request_lease(req, agent_id=args.agent_id, project_id=args.project_id)
+    _json(lease.to_dict())
+
+
+def cmd_broker_lease_release(args):
+    from browser_core.broker.session_router import SessionRouter
+
+    router = SessionRouter()
+    router.release_lease(args.lease_id)
+    _json({"released": args.lease_id, "ok": True})
+
+
+def cmd_broker_status(args):
+    from browser_core.broker.session_router import SessionRouter
+
+    router = SessionRouter()
+    _json(router.status())
+
+
 def _parser():
     parser = argparse.ArgumentParser(description="CDP Browser Automation Controller")
     parser.add_argument("--cdp-url", default=DEFAULT_CDP_URL, help=f"CDP URL (default: {DEFAULT_CDP_URL})")
     parser.add_argument("--match", default=None, help="Target tab by URL substring")
+    parser.add_argument("--lease", "--session", dest="lease", default=None, help="Scope operations to an active broker lease ID")
+    parser.add_argument("--fencing-token", type=int, default=None, help="Fencing token for lease validation")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("list-tabs", help="List all open browser tabs")
     p = sub.add_parser("goto", help="Navigate tab to a specific URL"); p.add_argument("url")
@@ -679,6 +768,22 @@ def _parser():
     p_promote.add_argument("--memory-root", default=None)
     p_suggest = recipe_sub.add_parser("suggest", help="Suggest learned recipes for a URL")
     p_suggest.add_argument("--url", default=None); p_suggest.add_argument("--memory-root", default=None)
+
+    # Broker commands
+    p_broker = sub.add_parser("broker", help="Concurrency and Resource Broker commands")
+    broker_sub = p_broker.add_subparsers(dest="broker_command", required=True)
+    p_lease = broker_sub.add_parser("lease", help="Manage broker leases")
+    lease_sub = p_lease.add_subparsers(dest="lease_action", required=True)
+    p_req = lease_sub.add_parser("request", help="Request a new browser lease")
+    p_req.add_argument("--class", dest="exec_class", choices=["S", "I", "A"], default="S", help="Execution class (S=Shared, I=Isolated, A=Auth)")
+    p_req.add_argument("--auth", default=None, help="Auth identity (e.g. google, github)")
+    p_req.add_argument("--timeout", type=float, default=300.0, help="Lease timeout in seconds (default: 300)")
+    p_req.add_argument("--agent-id", default="agent-default", help="Calling agent ID")
+    p_req.add_argument("--project-id", default="workbench", help="Calling project ID")
+    p_req.add_argument("--visual", action="store_true", default=False, help="Require visible/headful display")
+    p_rel = lease_sub.add_parser("release", help="Release an active browser lease")
+    p_rel.add_argument("lease_id", help="Lease ID to release")
+    broker_sub.add_parser("status", help="Get broker and system telemetry status")
     return parser
 
 
@@ -686,6 +791,14 @@ def main(argv=None):
     args = _parser().parse_args(argv)
     try:
         command = {"runBrowserCode": "run-code", "inspectVisual": "visual"}.get(args.command, args.command)
+        if command == "broker":
+            if args.broker_command == "status":
+                return cmd_broker_status(args)
+            if args.broker_command == "lease":
+                if args.lease_action == "request":
+                    return cmd_broker_lease_request(args)
+                if args.lease_action == "release":
+                    return cmd_broker_lease_release(args)
         if command == "learn":
             return globals()[f"cmd_learn_{args.learn_command}"](args)
         if command == "recipe":

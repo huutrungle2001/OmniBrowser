@@ -21,24 +21,41 @@ class _FrameState:
 class PageManager:
     """Owns a CDP connection; it never starts or owns the production browser."""
 
-    def __init__(self, cdp_url: str, agent_source: str | None = None, *, test_mode: bool = False):
+    def __init__(
+        self,
+        cdp_url: str,
+        agent_source: str | None = None,
+        *,
+        test_mode: bool = False,
+        context: BrowserContext | None = None,
+        browser_context_id: str | None = None,
+    ):
         self.cdp_url = cdp_url
         self.test_mode = test_mode
         self.agent_source = agent_source or Path(__file__).parents[2].joinpath("scripts", "dom_agent.js").read_text()
         self._playwright: Playwright | None = None
         self.browser: Browser | None = None
-        self.context: BrowserContext | None = None
+        self.context: BrowserContext | None = context
+        self.browser_context_id: str | None = browser_context_id
         self._frames: dict[object, _FrameState] = {}
         self._next_frame_token = 0
         self._sessions: dict[Page, object] = {}
 
     def connect(self) -> "PageManager":
+        if self.context:
+            return self
         parsed = urlparse(self.cdp_url)
         if self.test_mode and parsed.port == 17082:
             raise ValueError("Test mode refuses the live Chrome debugging port 17082")
         self._playwright = sync_playwright().start()
         self.browser = self._playwright.chromium.connect_over_cdp(self.cdp_url)
-        self.context = self.browser.contexts[0]
+        if self.browser_context_id:
+            for ctx in self.browser.contexts:
+                if getattr(ctx, "_browser_context_id", None) == self.browser_context_id:
+                    self.context = ctx
+                    break
+        if not self.context:
+            self.context = self.browser.contexts[0] if self.browser.contexts else self.browser.new_context()
         return self
 
     def close(self) -> None:

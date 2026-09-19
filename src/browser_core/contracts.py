@@ -38,6 +38,26 @@ class ActionTimeoutError(OmniBrowserError):
     exit_code = ExitCode.ACTION_TIMEOUT
 
 
+class LeaseExpiredError(OmniBrowserError):
+    """Raised when an operation is attempted with an expired or revoked lease."""
+    exit_code = ExitCode.POLICY_BLOCKED
+
+
+class LeaseNotFoundError(OmniBrowserError):
+    """Raised when a requested lease ID does not exist."""
+    exit_code = ExitCode.TARGET_NOT_FOUND
+
+
+class IdentityConflictError(OmniBrowserError):
+    """Raised when an exclusive identity lease is already held by another agent."""
+    exit_code = ExitCode.POLICY_BLOCKED
+
+
+class AdmissionRejectedError(OmniBrowserError):
+    """Raised when admission controller rejects request due to memory/CPU backpressure."""
+    exit_code = ExitCode.POLICY_BLOCKED
+
+
 @dataclass(frozen=True, slots=True)
 class DOMNodeRef:
     """An opaque reference valid only for one frame document epoch."""
@@ -136,3 +156,42 @@ class ActResult:
         result["state_delta"] = self.state_delta
         result["elapsed_ms"] = self.action_duration_ms
         return result
+
+
+class ExecutionClass:
+    CLASS_S = "S"  # Shared Multi-Context (warm daemon, headless=new, ephemeral context)
+    CLASS_I = "I"  # Isolated Dedicated Ephemeral (independent Chrome process, temp dir)
+    CLASS_A = "A"  # Authenticated & Interactive (dedicated headful, exclusive identity lease)
+
+
+@dataclass(slots=True)
+class BrowserRequirements:
+    execution_class: str = ExecutionClass.CLASS_S
+    auth_identity: str | None = None
+    requires_visual: bool = False
+    untrusted_site: bool = False
+    timeout_seconds: float = 300.0
+    exclusive_identity: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class Lease:
+    lease_id: str
+    agent_id: str
+    project_id: str
+    execution_class: str
+    fencing_token: int
+    cdp_url: str
+    browser_context_id: str | None = None
+    owned_target_ids: list[str] = field(default_factory=list)
+    auth_identity: str | None = None
+    expires_at: float = 0.0
+    is_active: bool = True
+    process_pid: int | None = None
+    user_data_dir: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)

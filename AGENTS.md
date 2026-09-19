@@ -87,6 +87,18 @@ Define success criteria. Loop until verified.
 7. **"Stop & Ask" Protocol for Web Capabilities**:
    - If `cdp_controller.py` does not currently support a specialized capability (e.g., complex canvas drag-and-drop, specific image CAPTCHA bypass, or nested OOPIF frames), the agent MUST STOP immediately and consult the user.
    - Absolutely NEVER attempt to "firefight" or bypass limitations by generating unauthorized ad-hoc scripts.
+8. **Lease Ownership Invariant**:
+   - No command executed without valid Lease; no cross-lease Target access.
+   - Every agent request must acquire and present a valid `lease_id` and monotonic `fencing_token`.
+   - Commands with expired or revoked leases are immediately rejected with `LeaseExpiredError`.
+9. **Profile Sanctity Invariant**:
+   - `~/.chrome-ai-profile` is Auth Source of Truth only, never a concurrent runtime profile.
+   - No automated test, agent, or background daemon may mount or lock `~/.chrome-ai-profile` as its active `--user-data-dir`.
+   - Auth state must be exported as immutable snapshots into `AuthStateVault` with `chmod 600`.
+10. **Failure Domain Separation Invariant**:
+    - `BrowserContext` is strictly for state and session isolation (cookies, storage, scoped tabs).
+    - `Process Boundary` is for crash and failure isolation (renderer crashes, GPU crashes, memory leaks).
+    - `Account Lease` is for server-side state isolation (preventing concurrent destructive operations on the same user account).
 
 ---
 

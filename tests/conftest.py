@@ -45,17 +45,34 @@ def guard_live_profile(monkeypatch):
     yield
 
 
-@pytest.fixture
-def ephemeral_cdp_url(ephemeral_user_data_dir):
-    """Launch a disposable Chromium and expose only its dynamically assigned CDP URL."""
-    with sync_playwright() as playwright:
-        executable = Path(playwright.chromium.executable_path)
+_CACHED_CHROME_BINARY: str | None = None
+
+
+def _get_chrome_binary() -> str | None:
+    global _CACHED_CHROME_BINARY
+    if _CACHED_CHROME_BINARY and Path(_CACHED_CHROME_BINARY).exists():
+        return _CACHED_CHROME_BINARY
     candidates = [
-        executable,
         Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
         Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
     ]
-    chrome_binary = next((candidate for candidate in candidates if candidate.exists()), None)
+    for candidate in candidates:
+        if candidate.exists():
+            _CACHED_CHROME_BINARY = str(candidate)
+            return _CACHED_CHROME_BINARY
+    try:
+        with sync_playwright() as playwright:
+            _CACHED_CHROME_BINARY = str(playwright.chromium.executable_path)
+            return _CACHED_CHROME_BINARY
+    except Exception:
+        pass
+    return None
+
+
+@pytest.fixture
+def ephemeral_cdp_url(ephemeral_user_data_dir):
+    """Launch a disposable Chromium and expose only its dynamically assigned CDP URL."""
+    chrome_binary = _get_chrome_binary()
     if chrome_binary is None:
         pytest.fail("No Chromium binary is available for the isolated CDP integration test.")
 
