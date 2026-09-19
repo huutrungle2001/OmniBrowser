@@ -405,22 +405,37 @@ def _store_recipes(store, url: str | None = None) -> list[Any]:
 
 
 def _store_get(store, recipe_id: str, memory: Any = None) -> Any:
+    from browser_core.recipes import Recipe, InvalidExecutableArtifact
+
     # 1. Path directly
     p = Path(recipe_id)
     if p.exists() and p.is_file():
-        from browser_core.recipes import Recipe
-        return Recipe.from_json(p)
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception as err:
+            raise ValueError(f"Failed to parse JSON from {p}: {err}") from err
+        if not isinstance(data, dict):
+            raise InvalidExecutableArtifact(f"Artifact {p} must be a JSON object")
+        if data.get("kind") == "omnibrowser.semantic_sitemap" or "interactive_elements" in data:
+            raise InvalidExecutableArtifact(f"Cannot execute sitemap {p} as a recipe")
+        if data.get("kind") not in (None, "omnibrowser.recipe", "omnibrowser.recipe_candidate"):
+            raise InvalidExecutableArtifact(f"Cannot execute artifact with kind: {data.get('kind')}")
+        return Recipe.from_dict(data)
 
     # 2. Store root / recipe_id (or with .json)
     if hasattr(store, "root"):
         cand_p = store.root / recipe_id
         if cand_p.is_file():
-            from browser_core.recipes import Recipe
-            return Recipe.from_json(cand_p)
+            data = json.loads(cand_p.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and (data.get("kind") == "omnibrowser.semantic_sitemap" or "interactive_elements" in data):
+                raise InvalidExecutableArtifact(f"Cannot execute sitemap {cand_p} as a recipe")
+            return Recipe.from_dict(data)
         cand_json = store.root / f"{recipe_id}.json"
         if cand_json.is_file():
-            from browser_core.recipes import Recipe
-            return Recipe.from_json(cand_json)
+            data = json.loads(cand_json.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and (data.get("kind") == "omnibrowser.semantic_sitemap" or "interactive_elements" in data):
+                raise InvalidExecutableArtifact(f"Cannot execute sitemap {cand_json} as a recipe")
+            return Recipe.from_dict(data)
 
     for name in ("get", "get_recipe", "find"):
         method = getattr(store, name, None)

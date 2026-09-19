@@ -12,7 +12,9 @@ import fnmatch
 import json
 import os
 from pathlib import Path
+import hashlib
 import re
+import shlex
 import sqlite3
 import threading
 import time
@@ -31,13 +33,21 @@ _TEMPLATE = re.compile(r"\{\{\s*([A-Za-z_][\w.-]*)\s*\}\}")
 _EMAIL = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
 _BEARER = re.compile(r"(?i)(bearer\s+)[A-Z0-9._~+/=-]+")
 _JWT = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
-_SECRET_KEY = re.compile(r"(?i)(password|passwd|passcode|token|secret|api[_-]?key|authorization)")
-_OTP_KEY = re.compile(r"(?i)(otp|one.?time|verification.?code|cvv|ssn|cookie|session)")
+_SECRET_KEY = re.compile(r"(?i)(password|passwd|passcode|token|secret|api[_-]?key|authorization|bearer|auth|credential|private[_-]?key|recovery[_-]?code)")
+_OTP_KEY = re.compile(r"(?i)(otp|one.?time|verification.?code|cvv|ssn|cookie|session|2fa|mfa)")
+_EMAIL_KEY = re.compile(r"(?i)(email|e-mail|mail)")
+_PHONE_KEY = re.compile(r"(?i)(phone|mobile|tel)")
+_NAME_KEY = re.compile(r"(?i)(first.?name|last.?name|full.?name|username|user|login)")
+_SEARCH_KEY = re.compile(r"(?i)(search|query|keyword|filter|find)")
 _FRAGILE_SELECTOR = re.compile(r"(?i)(:nth-(?:child|of-type)\(|^/|//)")
 
 
 class AnchorAmbiguous(ValueError):
     """A mutating recipe step resolved to more than one live element."""
+
+
+class InvalidExecutableArtifact(ValueError):
+    """The provided file or artifact is not an executable recipe or candidate."""
 
 
 def _memory_root(root: str | Path | None = None) -> Path:
@@ -46,9 +56,15 @@ def _memory_root(root: str | Path | None = None) -> Path:
 
 
 def _safe_url(url: str) -> str:
-    parsed = urlsplit(url)
-    # Query values frequently carry OAuth codes, session keys, and PII.
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    try:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").rstrip(".").lower()
+        port_part = f":{parsed.port}" if parsed.port else ""
+        netloc = f"{host}{port_part}" if host else ""
+        # Strictly strip userinfo (user:pass@), query values, and fragments
+        return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    except Exception:
+        return ""
 
 
 def _domain_from_url(url: str) -> str:
@@ -56,11 +72,15 @@ def _domain_from_url(url: str) -> str:
         parsed = urlparse(url)
         if parsed.scheme == "about":
             return f"about:{parsed.path or 'blank'}"
-        domain = parsed.netloc or parsed.path
-        if ":" in domain:
-            domain = domain.split(":")[0]
-        domain = domain.strip().lower()
-        return domain if domain else "generic"
+        host = (parsed.hostname or "").rstrip(".").lower()
+        if not host:
+            domain = parsed.netloc or parsed.path
+            if "@" in domain:
+                domain = domain.split("@")[-1]
+            if ":" in domain:
+                domain = domain.split(":")[0]
+            host = domain.strip().lower()
+        return host or "generic"
     except Exception:
         return "generic"
 
@@ -173,6 +193,12 @@ class Recipe:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "Recipe":
+        kind = data.get("kind")
+        if kind == "omnibrowser.semantic_sitemap" or "interactive_elements" in data:
+            raise InvalidExecutableArtifact("Sitemaps cannot be executed as recipes")
+        if kind is not None and kind not in {"omnibrowser.recipe", "omnibrowser.recipe_candidate"}:
+            raise InvalidExecutableArtifact(f"Invalid executable artifact kind: {kind!r}. Expected recipe or candidate.")
+
         required = ("id", "name", "domain_pattern", "steps")
         missing = [key for key in required if key not in data]
         if missing:
@@ -192,7 +218,8 @@ class Recipe:
         return cls.from_dict(data)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"id": self.id, "name": self.name, "description": self.description,
+        kind = "omnibrowser.recipe_candidate" if (self.metadata.get("automatic") or self.metadata.get("status") == "draft") else "omnibrowser.recipe"
+        return {"kind": kind, "schema_version": 1, "id": self.id, "name": self.name, "description": self.description,
                 "domain_pattern": self.domain_pattern,
                 "steps": [step.to_dict() for step in self.steps],
                 "validation": self.validation, "metadata": self.metadata}
@@ -335,6 +362,8 @@ class RecipeStore:
                     "value": value,
                 })
         data = {
+            "kind": "omnibrowser.semantic_sitemap",
+            "schema_version": 1,
             "url": _safe_url(url),
             "domain": domain,
             "path": urlparse(url).path,
@@ -342,7 +371,9 @@ class RecipeStore:
             "updated_at": time.time(),
             "interactive_elements": interactive_items,
         }
-        sitemap_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp_file = sitemaps_dir / f".tmp_{uuid4().hex[:8]}_{norm_path}.json"
+        temp_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp_file.replace(sitemap_file)
         return sitemap_file
 
     def get_sitemap(self, url: str) -> dict[str, Any] | None:
@@ -594,12 +625,20 @@ class LearningMemory:
             return None
         text = json.dumps(anchor).lower()
         val_str = str(value)
-        if _SECRET_KEY.search(text) or _OTP_KEY.search(text) or "password" in text:
-            name, sensitivity = ("password", "secret") if ("pass" in text or "secret" in text) else ("verification_code", "secret")
-        elif "email" in text or _EMAIL.search(val_str):
-            name, sensitivity = "email", "pii"
-        elif _BEARER.search(val_str) or _JWT.search(val_str):
+        if _BEARER.search(val_str) or _JWT.search(val_str) or "bearer" in text or "token" in text:
             name, sensitivity = "token", "secret"
+        elif _SECRET_KEY.search(text) or "current-password" in text or "new-password" in text or "password" in text:
+            name, sensitivity = "password", "secret"
+        elif _OTP_KEY.search(text) or "one-time-code" in text:
+            name, sensitivity = "verification_code", "secret"
+        elif _EMAIL_KEY.search(text) or _EMAIL.search(val_str):
+            name, sensitivity = "email", "pii"
+        elif _PHONE_KEY.search(text):
+            name, sensitivity = "phone", "pii"
+        elif _SEARCH_KEY.search(text):
+            name, sensitivity = "search_query", "runtime"
+        elif _NAME_KEY.search(text):
+            name, sensitivity = "username", "pii"
         else:
             name, sensitivity = "input_value", "runtime"
         return {"$ref": name, "kind": "runtime_param", "sensitivity": sensitivity, "persist_value": False}
@@ -913,6 +952,7 @@ class FlightRecorder:
         event = {
             "seq": len(journal.events) + 1,
             "action": action,
+            "status": "success",
             "target": _safe_json(dict(anchor or {}), name="anchor"),
             "value": sanitized_value,
             "expect": _safe_json(dict(expect or {}), name="expect"),
@@ -942,10 +982,11 @@ class FlightRecorder:
 
         if boundary_detected:
             distilled = cls.distill_journal(journal, memory_root=memory_root)
-            # Reset journal for the next sequence
-            journal.events = []
-            journal.initial_url = after_url
-            journal.domain = _domain_from_url(after_url)
+            if distilled is not None:
+                # Truncate committed events only after confirmed successful persistence
+                journal.events = []
+                journal.initial_url = after_url
+                journal.domain = _domain_from_url(after_url)
             return distilled
         return None
 
@@ -955,7 +996,8 @@ class FlightRecorder:
         journal: FlightJournal,
         memory_root: str | Path | None = None,
     ) -> dict[str, Any] | None:
-        if not journal.events:
+        successful_events = [e for e in journal.events if e.get("status", "success") == "success"]
+        if not successful_events:
             return None
         domain = journal.domain or _domain_from_url(journal.initial_url)
         recipe_id = f"auto-{domain.replace('.', '-')}-{uuid4().hex[:8]}"
@@ -966,7 +1008,7 @@ class FlightRecorder:
             recipe = distill_recipe(
                 recipe_id=recipe_id,
                 name=name,
-                steps=journal.events,
+                steps=successful_events,
                 domain_pattern=domain,
                 metadata={
                     "automatic": True,
@@ -980,12 +1022,14 @@ class FlightRecorder:
             candidates_dir = mem_root / domain / "candidates"
             candidates_dir.mkdir(parents=True, exist_ok=True)
             candidate_path = candidates_dir / f"{recipe_id}.json"
-            candidate_path.write_text(recipe.to_json(), encoding="utf-8")
+            temp_cand = candidates_dir / f".tmp_{uuid4().hex[:8]}_{recipe_id}.json"
+            temp_cand.write_text(recipe.to_json(), encoding="utf-8")
+            temp_cand.replace(candidate_path)
 
             ledger_db = mem_root / domain / "ledger.db"
             with sqlite3.connect(ledger_db, timeout=5) as db:
                 db.execute("CREATE TABLE IF NOT EXISTS executions (candidate_id TEXT, outcome TEXT NOT NULL, recorded_at REAL NOT NULL, details TEXT NOT NULL)")
-                db.execute("INSERT INTO executions VALUES (?, ?, ?, ?)", (recipe_id, "implicit_distilled", time.time(), json.dumps({"session_id": journal.session_id, "steps_count": len(journal.events)})))
+                db.execute("INSERT INTO executions VALUES (?, ?, ?, ?)", (recipe_id, "implicit_distilled", time.time(), json.dumps({"session_id": journal.session_id, "steps_count": len(successful_events)})))
 
             return {
                 "candidate_id": recipe_id,
@@ -1025,16 +1069,20 @@ def suggest_for_url(
         # Extract required parameters
         params = sorted({m.group(1) for m in _TEMPLATE.finditer(json.dumps(r.to_dict()))})
         if params:
-            param_str = json.dumps({p: f"<{p}>" for p in params})
-            cmd = f"python3 scripts/cdp_controller.py recipe run {r.id} --params '{param_str}'"
+            param_dict = {p: f"<{p}>" for p in params}
+            param_str = json.dumps(param_dict)
+            argv = ["python3", "scripts/cdp_controller.py", "recipe", "run", str(r.id), "--params", param_str]
+            cmd = f"python3 scripts/cdp_controller.py recipe run {shlex.quote(str(r.id))} --params {shlex.quote(param_str)}"
         else:
-            cmd = f"python3 scripts/cdp_controller.py recipe run {r.id}"
+            argv = ["python3", "scripts/cdp_controller.py", "recipe", "run", str(r.id)]
+            cmd = f"python3 scripts/cdp_controller.py recipe run {shlex.quote(str(r.id))}"
 
         suggestions.append({
             "recipe_id": r.id,
             "name": r.name,
             "confidence": confidence,
             "command": cmd,
+            "argv": argv,
             "source": "curated",
             "required_params": params,
         })
@@ -1059,16 +1107,20 @@ def suggest_for_url(
                 if isinstance(step.get("value"), Mapping) and step["value"].get("$ref")
             })
             if params:
-                param_str = json.dumps({p: f"<{p}>" for p in params})
-                cmd = f"python3 scripts/cdp_controller.py recipe run {cid} --params '{param_str}'"
+                param_dict = {p: f"<{p}>" for p in params}
+                param_str = json.dumps(param_dict)
+                argv = ["python3", "scripts/cdp_controller.py", "recipe", "run", str(cid), "--params", param_str]
+                cmd = f"python3 scripts/cdp_controller.py recipe run {shlex.quote(str(cid))} --params {shlex.quote(param_str)}"
             else:
-                cmd = f"python3 scripts/cdp_controller.py recipe run {cid}"
+                argv = ["python3", "scripts/cdp_controller.py", "recipe", "run", str(cid)]
+                cmd = f"python3 scripts/cdp_controller.py recipe run {shlex.quote(str(cid))}"
 
             suggestions.append({
                 "recipe_id": cid,
                 "name": c.get("name", cid),
                 "confidence": round(confidence, 2),
                 "command": cmd,
+                "argv": argv,
                 "source": "learned",
                 "required_params": params,
             })
