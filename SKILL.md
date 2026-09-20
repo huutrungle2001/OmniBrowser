@@ -178,6 +178,58 @@ python3 scripts/cdp_controller.py --lease <lease_id> act click <ref>
 python3 scripts/cdp_controller.py broker lease release <lease_id>
 ```
 
+### 2.8 State-Transition Graph & Workflow Composition (`workflow`)
+Composes long-journey multi-step workflows from atomic guarded recipes using Dijkstra lowest-cost path-finding across a state-transition graph ($S_i \xrightarrow{R} S_j$) with R0–R4 risk gating:
+
+```bash
+# Display state transition graph topology
+python3 scripts/cdp_controller.py workflow graph
+
+# Plan an optimal low-risk path from current state to a target state
+python3 scripts/cdp_controller.py workflow plan --target state_dashboard
+
+# Execute a planned workflow with automatic state verification and JIT write barriers
+python3 scripts/cdp_controller.py workflow run --target state_dashboard
+
+# Allow irreversible R4 actions during execution
+python3 scripts/cdp_controller.py workflow run --target state_delete_account --allow-irreversible
+```
+
+### 2.9 Cross-Agent Promotion & Shared Cache Governance (`recipe lifecycle`)
+Manages recipe progression across multi-agent environments with linearizable flock CAS, evidence diversity validation, and automated quarantine:
+
+```bash
+# Inspect recipe lifecycle status, generation, and evidence counters
+python3 scripts/cdp_controller.py recipe lifecycle <recipe_id>
+
+# Promote a recipe following evidence-based promotion policy
+python3 scripts/cdp_controller.py recipe promote <recipe_id> --target-state VERIFIED_SHARED
+
+# Administrative promotion override with mandatory audit record
+python3 scripts/cdp_controller.py recipe promote <recipe_id> --target-state CURATED --privileged --actor "lead_agent" --reason "benchmark verified"
+
+# Quarantine a broken or suspect recipe
+python3 scripts/cdp_controller.py recipe quarantine <recipe_id> --reason "Selector drift on login button"
+
+# Safe restore a quarantined recipe back to VERIFIED_LOCAL
+python3 scripts/cdp_controller.py recipe restore <recipe_id>
+```
+
+### 2.10 Self-Healing Anchor Bundles & Offline Repair (`recipe repair`)
+Employs multi-candidate `AnchorBundle` targets with dynamic ambiguity checks and offline repair promotion. Online healing leaves canonical recipes 100% immutable, logging candidates to `.repairs.jsonl`:
+
+```bash
+# List recorded self-healing drift candidates
+python3 scripts/cdp_controller.py recipe repair list
+python3 scripts/cdp_controller.py recipe repair list --recipe-id <recipe_id>
+
+# Inspect details of a repair event
+python3 scripts/cdp_controller.py recipe repair inspect <repair_id>
+
+# Promote a verified repair candidate to primary anchor (CAS-protected generation increment)
+python3 scripts/cdp_controller.py recipe repair apply <repair_id> --actor "qa_lead" --reason "verified on staging"
+```
+
 ---
 
 ## 3. Python API Integration
