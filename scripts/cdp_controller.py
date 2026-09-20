@@ -47,6 +47,22 @@ def _is_loopback_host(hostname: str | None) -> bool:
     return bool(hostname and hostname.lower() in _LOOPBACK_HOSTS)
 
 
+def _reset_color_scheme(page: Any) -> None:
+    """Reset emulated media query so Chromium falls back to native prefers-color-scheme.
+
+    Prevents Playwright connect_over_cdp() from overriding and strobing dark/light themes.
+    """
+    if not page:
+        return
+    try:
+        page.emulate_media(color_scheme="null")
+    except Exception:
+        try:
+            page.emulate_media(color_scheme=None)
+        except Exception:
+            pass
+
+
 def _legacy_context_and_page(browser, url_substring=None):
     context = browser.contexts[0] if browser.contexts else browser.new_context()
     if url_substring:
@@ -54,6 +70,7 @@ def _legacy_context_and_page(browser, url_substring=None):
         for page in context.pages:
             if url_substring in page.url:
                 page.bring_to_front()
+                _reset_color_scheme(page)
                 return context, page
         # Second priority: match in page title with timeout guard
         for page in context.pages:
@@ -61,11 +78,13 @@ def _legacy_context_and_page(browser, url_substring=None):
                 t = page.evaluate("() => document.title")
                 if t and url_substring.lower() in t.lower():
                     page.bring_to_front()
+                    _reset_color_scheme(page)
                     return context, page
             except Exception:
                 pass
     page = context.pages[0] if context.pages else context.new_page()
     page.bring_to_front()
+    _reset_color_scheme(page)
     return context, page
 
 
@@ -126,6 +145,7 @@ def cmd_list_tabs(args):
         print(f"{'INDEX':<6} | {'TITLE':<40} | {'URL'}")
         print("-" * 90)
         for i, page in enumerate(pages):
+            _reset_color_scheme(page)
             print(f"{i:<6} | {page.title()[:38]:<40} | {page.url[:50]}")
 
 
@@ -148,16 +168,19 @@ def _legacy_page(args):
         # Priority 1: substring in URL
         for page in context.pages:
             if args.match in page.url:
+                _reset_color_scheme(page)
                 return playwright, browser, context, page
         # Priority 2: title match
         for page in context.pages:
             try:
                 if page.title() and args.match.lower() in page.title().lower():
+                    _reset_color_scheme(page)
                     return playwright, browser, context, page
             except Exception:
                 pass
 
     page = context.pages[0] if context.pages else context.new_page()
+    _reset_color_scheme(page)
     return playwright, browser, context, page
 
 
@@ -182,7 +205,107 @@ def cmd_eval(args):
         playwright.stop()
 
 
+def _raw_cdp_screenshot(
+    cdp_url: str,
+    output_path: str,
+    match: str | None = None,
+    context_id: str | None = None,
+) -> bool:
+    """Capture a screenshot directly via raw CDP WebSocket without initializing Playwright.
+
+    Bypasses Playwright startup, drops latency to ~30ms, consumes near-zero CPU,
+    and avoids theme strobing entirely.
+    """
+    import base64
+    import json
+    import time
+    from pathlib import Path
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(f"{cdp_url}/json/list")
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return False
+
+    pages = [p for p in data if p.get("type") == "page" and p.get("webSocketDebuggerUrl")]
+    if not pages:
+        return False
+
+    if context_id:
+        context_pages = [p for p in pages if p.get("browserContextId") == context_id]
+        if context_pages:
+            pages = context_pages
+
+    target = None
+    if match:
+        for p in pages:
+            if match in p.get("url", ""):
+                target = p
+                break
+        if not target:
+            for p in pages:
+                if match.lower() in p.get("title", "").lower():
+                    target = p
+                    break
+    else:
+        target = pages[0]
+
+    if not target or not target.get("webSocketDebuggerUrl"):
+        return False
+
+    ws_url = target["webSocketDebuggerUrl"]
+    fmt = "png"
+    low = output_path.lower()
+    if low.endswith(".jpg") or low.endswith(".jpeg"):
+        fmt = "jpeg"
+    elif low.endswith(".webp"):
+        fmt = "webp"
+
+    cmd = {
+        "id": 1,
+        "method": "Page.captureScreenshot",
+        "params": {"format": fmt},
+    }
+
+    try:
+        from websockets.sync.client import connect
+
+        with connect(ws_url, open_timeout=2.0, close_timeout=2.0) as ws:
+            ws.send(json.dumps(cmd))
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                resp_raw = ws.recv(timeout=2.0)
+                msg = json.loads(resp_raw)
+                if msg.get("id") == 1:
+                    if "error" in msg:
+                        return False
+                    data_b64 = msg.get("result", {}).get("data")
+                    if not data_b64:
+                        return False
+                    img_bytes = base64.b64decode(data_b64)
+                    out = Path(output_path)
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    out.write_bytes(img_bytes)
+                    return True
+    except Exception:
+        return False
+
+    return False
+
+
 def cmd_screenshot(args):
+    router, lease, cdp_url, context_id = _resolve_lease(args)
+    # Fast path: raw CDP WebSocket capture (bypasses Playwright, ~30ms, no theme strobing)
+    try:
+        if _raw_cdp_screenshot(cdp_url, args.output, match=getattr(args, "match", None), context_id=context_id):
+            print(f"Screenshot saved to: {args.output}")
+            return
+    except Exception:
+        pass
+
+    # Fallback to Playwright
     playwright, browser, _context, page = _legacy_page(args)
     try:
         page.screenshot(path=args.output)
@@ -224,6 +347,7 @@ def _manager_page(args):
                         break
                 except Exception:
                     pass
+    _reset_color_scheme(page)
     manager.install_scanner(page)
     return manager, page
 

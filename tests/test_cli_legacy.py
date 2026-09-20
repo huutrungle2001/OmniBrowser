@@ -182,3 +182,38 @@ def test_visual_cli_writes_targeted_crop(ephemeral_cdp_url, fixture_server, tmp_
     assert visual_payload["requires_human_verification"] is False
     assert output_path.is_file()
     assert output_path.stat().st_size > 0
+
+
+def test_raw_cdp_screenshot_fast_path(ephemeral_cdp_url, fixture_server, tmp_path):
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from cdp_controller import _raw_cdp_screenshot
+
+    _goto(ephemeral_cdp_url, fixture_server)
+    fast_out = tmp_path / "fast_screenshot.png"
+    ok = _raw_cdp_screenshot(ephemeral_cdp_url, str(fast_out), match="interactive_page")
+    assert ok is True
+    assert fast_out.is_file()
+    assert fast_out.stat().st_size > 0
+    with open(fast_out, "rb") as f:
+        magic = f.read(8)
+        assert magic == b"\x89PNG\r\n\x1a\n"
+
+
+def test_theme_color_scheme_reset_prevents_flicker(ephemeral_cdp_url, fixture_server):
+    from browser_core.page_manager import PageManager, _reset_color_scheme
+
+    manager = PageManager(ephemeral_cdp_url, test_mode=True)
+    manager.connect()
+    try:
+        page = manager.primary_page()
+        # Simulate Playwright connect_over_cdp forced light mode
+        page.emulate_media(color_scheme="light")
+        assert page.evaluate("window.matchMedia('(prefers-color-scheme: light)').matches") is True
+
+        # Call _reset_color_scheme - clears forced override
+        _reset_color_scheme(page)
+
+        # install_scanner also explicitly resets CDP Emulation.setEmulatedMedia
+        manager.install_scanner(page)
+    finally:
+        manager.close()

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
+from typing import Any
 import weakref
 
 from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_playwright
@@ -16,6 +17,22 @@ from .contracts import DOMNodeRef, ObserveResult, ObservedNode, TargetNotFoundEr
 class _FrameState:
     token: str
     epoch: int = 1
+
+
+def _reset_color_scheme(page: Any) -> None:
+    """Reset emulated media query so Chromium falls back to native prefers-color-scheme.
+
+    Prevents Playwright connect_over_cdp() from overriding and strobing dark/light themes.
+    """
+    if not page:
+        return
+    try:
+        page.emulate_media(color_scheme="null")
+    except Exception:
+        try:
+            page.emulate_media(color_scheme=None)
+        except Exception:
+            pass
 
 
 class PageManager:
@@ -58,6 +75,8 @@ class PageManager:
                     break
         if not self.context:
             self.context = self.browser.contexts[0] if self.browser.contexts else self.browser.new_context()
+        for p in self.context.pages:
+            _reset_color_scheme(p)
         return self
 
     def close(self) -> None:
@@ -77,12 +96,19 @@ class PageManager:
     def primary_page(self) -> Page:
         if not self.context:
             raise RuntimeError("PageManager is not connected")
-        return self.context.pages[0] if self.context.pages else self.context.new_page()
+        page = self.context.pages[0] if self.context.pages else self.context.new_page()
+        _reset_color_scheme(page)
+        return page
 
     def install_scanner(self, page: Page) -> None:
         """Register before navigation and bootstrap the current document if present."""
+        _reset_color_scheme(page)
         session = page.context.new_cdp_session(page)
         session.send("Page.enable")
+        try:
+            session.send("Emulation.setEmulatedMedia", {"media": "", "features": []})
+        except Exception:
+            pass
         session.send("Page.addScriptToEvaluateOnNewDocument", {"source": self.agent_source})
         self._sessions[page] = session
         _MANAGERS[page] = self
