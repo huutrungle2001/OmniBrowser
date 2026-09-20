@@ -18,8 +18,12 @@ from browser_core.contracts import (
     RecipeLifecycleState,
     RepairCandidate,
     RiskClass,
+    RiskGateError,
     SemanticStateNode,
+    StaleRepairError,
     TransitionEdge,
+    UnknownSideEffectError,
+    WorkflowInterruptedError,
     WorkflowPlan,
 )
 from browser_core.page_manager import PageManager
@@ -297,6 +301,8 @@ def test_offline_repair_application(tmp_path):
         broken_candidate={"kind": "test_attr", "selector": '[data-testid="stale-selector"]', "score": 0.95},
         healed_candidate={"kind": "role_name", "role": "button", "name": "New Button", "score": 0.91},
         confidence=0.91,
+        recipe_generation=recipe.lifecycle.generation,
+        recipe_content_digest=recipe.lifecycle.content_digest,
     )
     store.record_repair_candidate(repair)
 
@@ -481,3 +487,486 @@ def test_anchor_resolver_edge_cases(ephemeral_cdp_url, fixture_server):
             AnchorResolver.resolve(page, bundle_empty)
     finally:
         manager.close()
+
+
+# 8. Negative Regression: UNKNOWN_SIDE_EFFECT is strictly terminal (0 detours, 0 subsequent dispatches)
+def test_unknown_side_effect_never_detours(ephemeral_cdp_url, fixture_server, tmp_path):
+    manager, page = _session(ephemeral_cdp_url, fixture_server)
+    try:
+        page.set_content("""
+            <div id="app">
+                <button id="danger-step">Dangerous Operation</button>
+                <button id="detour-step">Detour Route</button>
+                <button id="step-2">Subsequent Step</button>
+                <div id="status">initial</div>
+            </div>
+            <script>
+                document.getElementById('danger-step').onclick = () => {
+                    document.getElementById('status').textContent = 'partially_mutated';
+                };
+            </script>
+        """)
+
+        store = RecipeStore(root=tmp_path / "recipes")
+
+        # Step 1 Recipe: Clicks dangerous operation (R3 persistent mutation), but postcondition fails.
+        # This simulates a mutation started where side effect cannot be verified (UNKNOWN_SIDE_EFFECT).
+        r1 = Recipe(
+            id="r-danger-unknown",
+            name="Dangerous Unknown Effect Recipe",
+            domain_pattern="*",
+            steps=[
+                RecipeStep(
+                    action="click",
+                    target="#danger-step",
+                    risk_class=RiskClass.R3_PERSISTENT_MUTATION,
+                )
+            ],
+            postconditions=[{"role": "heading", "name": "Non-existent Confirmation"}],
+        )
+        store.save(r1)
+
+        # Detour Recipe
+        r_detour = Recipe(
+            id="r-detour-route",
+            name="Detour Route Recipe",
+            domain_pattern="*",
+            steps=[RecipeStep(action="click", target="#detour-step", risk_class=RiskClass.R2_LOCAL_MUTABLE)],
+        )
+        store.save(r_detour)
+
+        # Step 2 Recipe (Subsequent)
+        r2 = Recipe(
+            id="r-subsequent-step",
+            name="Subsequent Step Recipe",
+            domain_pattern="*",
+            steps=[RecipeStep(action="click", target="#step-2", risk_class=RiskClass.R2_LOCAL_MUTABLE)],
+        )
+        store.save(r2)
+
+        graph = StateTransitionGraph()
+        graph.add_state(SemanticStateNode(state_id="state:init", domain="example.com"))
+        graph.add_state(SemanticStateNode(state_id="state:mid", domain="example.com"))
+        graph.add_state(SemanticStateNode(state_id="state:final", domain="example.com"))
+
+        # Primary planned edges: init -> mid -> final
+        edge1 = TransitionEdge(
+            edge_id="edge-1-danger",
+            from_state="state:init",
+            to_state="state:mid",
+            recipe_id=r1.id,
+            risk_class=RiskClass.R3_PERSISTENT_MUTATION,
+            cost=1.0,
+        )
+        edge2 = TransitionEdge(
+            edge_id="edge-2-subsequent",
+            from_state="state:mid",
+            to_state="state:final",
+            recipe_id=r2.id,
+            risk_class=RiskClass.R2_LOCAL_MUTABLE,
+            cost=1.0,
+        )
+        graph.add_edge(edge1)
+        graph.add_edge(edge2)
+
+        # Detour edge: init -> final
+        edge_detour = TransitionEdge(
+            edge_id="edge-detour",
+            from_state="state:init",
+            to_state="state:final",
+            recipe_id=r_detour.id,
+            risk_class=RiskClass.R2_LOCAL_MUTABLE,
+            cost=2.0,
+        )
+        graph.add_edge(edge_detour)
+
+        plan = WorkflowPlan(
+            plan_id="plan-unknown-safety",
+            start_state="state:init",
+            goal_state="state:final",
+            edges=[edge1, edge2],
+            cumulative_risk=RiskClass.R3_PERSISTENT_MUTATION,
+            estimated_steps=2,
+        )
+
+        engine = WorkflowEngine(store=store, graph=graph)
+
+        # Execute with allow_detour=True
+        result = engine.execute(plan, page, manager=manager, allow_detour=True, raise_on_unknown_effect=False)
+
+        # Invariant 1: Terminal halt on UNKNOWN_SIDE_EFFECT
+        assert result.ok is False
+        assert result.outcome == ExecutionOutcome.UNKNOWN_SIDE_EFFECT
+        assert result.failure_edge == "edge-1-danger"
+        # Zero detours taken!
+        assert result.detour_taken is False
+        assert len([e for e in result.edge_results if e.get("detour")]) == 0
+        # Zero subsequent edges dispatched! (edge 2 was never executed)
+        assert len(result.edge_results) == 1
+        assert result.edge_results[0]["edge_id"] == "edge-1-danger"
+
+        # Also verify that when raise_on_unknown_effect=True, UnknownSideEffectError is raised immediately
+        with pytest.raises(UnknownSideEffectError):
+            engine.execute(plan, page, manager=manager, allow_detour=True, raise_on_unknown_effect=True)
+    finally:
+        manager.close()
+
+
+# 9. Negative Regression: R3/R4 Low-Confidence / Text-Only Candidates Disqualified
+def test_r3_r4_low_confidence_candidate_disqualified(ephemeral_cdp_url, fixture_server):
+    manager, page = _session(ephemeral_cdp_url, fixture_server)
+    try:
+        page.set_content("""
+            <div id="container">
+                <button id="destroy-btn" class="action-btn">Permanently Delete</button>
+            </div>
+        """)
+
+        # 1. Text-only candidate (count == 1, score 0.95)
+        cand_text = AnchorCandidate(kind="text", name="Permanently Delete", score=0.95)
+        # 2. Low-confidence scoped_css (count == 1, score 0.75 < 0.80)
+        cand_low = AnchorCandidate(kind="scoped_css", selector="#destroy-btn", score=0.75)
+        # 3. Mid-confidence scoped_css (count == 1, score 0.85 >= 0.80, but < 0.90)
+        cand_mid = AnchorCandidate(kind="scoped_css", selector="#destroy-btn", score=0.85)
+        # 4. Neighborhood candidate (count == 1, score 0.92 >= 0.90)
+        cand_neigh = AnchorCandidate(kind="neighborhood", selector="#destroy-btn", score=0.92)
+        # 5. High-confidence semantic role_name candidate (count == 1, score 0.95)
+        cand_high = AnchorCandidate(kind="role_name", role="button", name="Permanently Delete", score=0.95)
+
+        # Test R3 Requirements:
+        # - Text-only is strictly disqualified even if count == 1 and score == 0.95
+        with pytest.raises(AnchorNotFound):
+            AnchorResolver.resolve(
+                page,
+                AnchorBundle(candidates=[cand_text]),
+                mutating=True,
+                risk_class=RiskClass.R3_PERSISTENT_MUTATION,
+            )
+
+        # - Score < 0.80 is strictly disqualified for R3 even if count == 1
+        with pytest.raises(AnchorNotFound):
+            AnchorResolver.resolve(
+                page,
+                AnchorBundle(candidates=[cand_low]),
+                mutating=True,
+                risk_class=RiskClass.R3_PERSISTENT_MUTATION,
+            )
+
+        # - Score >= 0.80 non-text is accepted for R3
+        loc, cand, score = AnchorResolver.resolve(
+            page,
+            AnchorBundle(candidates=[cand_mid]),
+            mutating=True,
+            risk_class=RiskClass.R3_PERSISTENT_MUTATION,
+        )
+        assert loc.count() == 1
+        assert cand.selector == "#destroy-btn"
+
+        # - Neighborhood with score >= 0.80 is accepted for R3
+        loc, cand, score = AnchorResolver.resolve(
+            page,
+            AnchorBundle(candidates=[cand_neigh]),
+            mutating=True,
+            risk_class=RiskClass.R3_PERSISTENT_MUTATION,
+        )
+        assert loc.count() == 1
+        assert cand.kind == "neighborhood"
+
+        # Test R4 Requirements:
+        # - Text-only disqualified for R4
+        with pytest.raises(AnchorNotFound):
+            AnchorResolver.resolve(
+                page,
+                AnchorBundle(candidates=[cand_text]),
+                mutating=True,
+                risk_class=RiskClass.R4_IRREVERSIBLE,
+            )
+
+        # - Score < 0.90 disqualified for R4 (cand_mid has 0.85)
+        with pytest.raises(AnchorNotFound):
+            AnchorResolver.resolve(
+                page,
+                AnchorBundle(candidates=[cand_mid]),
+                mutating=True,
+                risk_class=RiskClass.R4_IRREVERSIBLE,
+            )
+
+        # - Neighborhood is strictly disqualified for R4 even if score >= 0.90 (cand_neigh has 0.92)
+        with pytest.raises(AnchorNotFound):
+            AnchorResolver.resolve(
+                page,
+                AnchorBundle(candidates=[cand_neigh]),
+                mutating=True,
+                risk_class=RiskClass.R4_IRREVERSIBLE,
+            )
+
+        # - High-confidence semantic candidate (score >= 0.90) is accepted for R4
+        loc, cand, score = AnchorResolver.resolve(
+            page,
+            AnchorBundle(candidates=[cand_text, cand_low, cand_mid, cand_neigh, cand_high]),
+            mutating=True,
+            risk_class=RiskClass.R4_IRREVERSIBLE,
+        )
+        assert loc.count() == 1
+        assert cand.kind == "role_name"
+        assert cand.name == "Permanently Delete"
+        assert score == 0.95
+    finally:
+        manager.close()
+
+
+# 10. Negative Regression: Detour Preserves Original Risk Envelope
+def test_detour_preserves_risk_envelope(ephemeral_cdp_url, fixture_server, tmp_path):
+    manager, page = _session(ephemeral_cdp_url, fixture_server)
+    try:
+        page.set_content("""
+            <div id="app">
+                <button id="btn-r3">Perform R3 Action</button>
+                <button id="btn-r4">Perform R4 Destructive Action</button>
+                <div id="output">ready</div>
+            </div>
+        """)
+
+        store = RecipeStore(root=tmp_path / "recipes")
+
+        # Direct recipe (R2) that fails because target does not exist
+        r_direct = Recipe(
+            id="r-direct-r2",
+            name="Direct R2",
+            domain_pattern="*",
+            steps=[RecipeStep(action="click", target="#non-existent-direct", risk_class=RiskClass.R2_LOCAL_MUTABLE)],
+        )
+        store.save(r_direct)
+
+        # Detour edge requiring R3
+        r_detour_r3 = Recipe(
+            id="r-detour-r3",
+            name="Detour R3",
+            domain_pattern="*",
+            steps=[RecipeStep(action="click", target="#btn-r3", risk_class=RiskClass.R3_PERSISTENT_MUTATION)],
+        )
+        store.save(r_detour_r3)
+
+        # Detour edge requiring R4
+        r_detour_r4 = Recipe(
+            id="r-detour-r4",
+            name="Detour R4",
+            domain_pattern="*",
+            steps=[RecipeStep(action="click", target="#btn-r4", risk_class=RiskClass.R4_IRREVERSIBLE)],
+        )
+        store.save(r_detour_r4)
+
+        graph = StateTransitionGraph()
+        graph.add_state(SemanticStateNode(state_id="state:start", domain="example.com"))
+        graph.add_state(SemanticStateNode(state_id="state:goal", domain="example.com"))
+
+        graph.add_edge(TransitionEdge(
+            edge_id="edge-direct-r2",
+            from_state="state:start",
+            to_state="state:goal",
+            recipe_id=r_direct.id,
+            risk_class=RiskClass.R2_LOCAL_MUTABLE,
+            cost=1.0,
+        ))
+        graph.add_edge(TransitionEdge(
+            edge_id="edge-detour-r3",
+            from_state="state:start",
+            to_state="state:goal",
+            recipe_id=r_detour_r3.id,
+            risk_class=RiskClass.R3_PERSISTENT_MUTATION,
+            cost=1.5,
+        ))
+        graph.add_edge(TransitionEdge(
+            edge_id="edge-detour-r4",
+            from_state="state:start",
+            to_state="state:goal",
+            recipe_id=r_detour_r4.id,
+            risk_class=RiskClass.R4_IRREVERSIBLE,
+            cost=0.5,  # Artificially cheap cost to verify pruning over cost
+        ))
+
+        # Test STG graph find_alternate_path risk envelope pruning directly:
+        # 1. When max_allowed_risk is R2, both R3 and R4 edges are pruned -> returns None
+        assert graph.find_alternate_path(
+            "state:start", "state:goal",
+            excluded_edge_ids={"edge-direct-r2"},
+            max_allowed_risk=RiskClass.R2_LOCAL_MUTABLE,
+            allow_r4=False,
+        ) is None
+
+        # 2. When max_allowed_risk is R3 and allow_r4=False: R3 is chosen, R4 is pruned even though R4 has lower cost
+        alt_r3 = graph.find_alternate_path(
+            "state:start", "state:goal",
+            excluded_edge_ids={"edge-direct-r2"},
+            max_allowed_risk=RiskClass.R3_PERSISTENT_MUTATION,
+            allow_r4=False,
+        )
+        assert alt_r3 is not None
+        assert len(alt_r3) == 1
+        assert alt_r3[0].edge_id == "edge-detour-r3"
+
+        # 3. When max_allowed_risk is R4 but allow_r4=False: R4 is STILL pruned
+        alt_r4_blocked = graph.find_alternate_path(
+            "state:start", "state:goal",
+            excluded_edge_ids={"edge-direct-r2"},
+            max_allowed_risk=RiskClass.R4_IRREVERSIBLE,
+            allow_r4=False,
+        )
+        assert alt_r4_blocked is not None
+        assert alt_r4_blocked[0].edge_id == "edge-detour-r3"
+
+        # Test WorkflowEngine execution respects original R2 workflow plan envelope:
+        plan_r2 = WorkflowPlan(
+            plan_id="plan-r2-bounded",
+            start_state="state:start",
+            goal_state="state:goal",
+            edges=[graph.get_outgoing_edges("state:start")[0]],
+            cumulative_risk=RiskClass.R2_LOCAL_MUTABLE,
+            estimated_steps=1,
+        )
+
+        engine = WorkflowEngine(store=store, graph=graph)
+        res = engine.execute(plan_r2, page, manager=manager, allow_detour=True, allow_r4=False)
+
+        # The engine must refuse to take R3 or R4 detours that exceed the original R2 envelope!
+        assert res.ok is False
+        assert res.outcome == ExecutionOutcome.SAFE_FAILURE
+        assert res.detour_taken is False
+        assert len(res.edge_results) == 1
+        assert res.edge_results[0]["edge_id"] == "edge-direct-r2"
+    finally:
+        manager.close()
+
+
+# 11. Negative Regression: Dynamic Replanning Accumulates Failed Edges and Halts on max_detours
+def test_detour_bounded_and_accumulates_failed_edges(ephemeral_cdp_url, fixture_server, tmp_path):
+    manager, page = _session(ephemeral_cdp_url, fixture_server)
+    try:
+        page.set_content("""
+            <div id="app">
+                <button id="success-btn">Final Success</button>
+                <div id="status">idle</div>
+            </div>
+            <script>
+                document.getElementById('success-btn').onclick = () => {
+                    document.getElementById('status').textContent = 'Reached Success!';
+                };
+            </script>
+        """)
+
+        store = RecipeStore(root=tmp_path / "recipes")
+
+        # 3 recipes that fail because target selector is missing
+        r_fail1 = Recipe(id="r-f1", name="Fail 1", domain_pattern="*", steps=[RecipeStep(action="click", target="#missing-1")])
+        r_fail2 = Recipe(id="r-f2", name="Fail 2", domain_pattern="*", steps=[RecipeStep(action="click", target="#missing-2")])
+        r_fail3 = Recipe(id="r-f3", name="Fail 3", domain_pattern="*", steps=[RecipeStep(action="click", target="#missing-3")])
+        # 1 recipe that succeeds
+        r_succ = Recipe(id="r-succ", name="Success", domain_pattern="*", steps=[RecipeStep(action="click", target="#success-btn")])
+
+        store.save(r_fail1)
+        store.save(r_fail2)
+        store.save(r_fail3)
+        store.save(r_succ)
+
+        graph = StateTransitionGraph()
+        graph.add_state(SemanticStateNode(state_id="state:start", domain="example.com"))
+        graph.add_state(SemanticStateNode(state_id="state:end", domain="example.com"))
+
+        e1 = TransitionEdge(edge_id="edge-fail-1", from_state="state:start", to_state="state:end", recipe_id=r_fail1.id, cost=1.0)
+        e2 = TransitionEdge(edge_id="edge-fail-2", from_state="state:start", to_state="state:end", recipe_id=r_fail2.id, cost=2.0)
+        e3 = TransitionEdge(edge_id="edge-fail-3", from_state="state:start", to_state="state:end", recipe_id=r_fail3.id, cost=3.0)
+        e4 = TransitionEdge(edge_id="edge-success-4", from_state="state:start", to_state="state:end", recipe_id=r_succ.id, cost=4.0)
+
+        graph.add_edge(e1)
+        graph.add_edge(e2)
+        graph.add_edge(e3)
+        graph.add_edge(e4)
+
+        plan = WorkflowPlan(
+            plan_id="plan-bounded-replanning",
+            start_state="state:start",
+            goal_state="state:end",
+            edges=[e1],
+            cumulative_risk=RiskClass.R2_LOCAL_MUTABLE,
+            estimated_steps=1,
+        )
+
+        engine = WorkflowEngine(store=store, graph=graph)
+
+        # With max_detours=2:
+        # e1 fails -> replan 1 selects e2 (detour_count=1, failed_edges={e1})
+        # e2 fails -> replan 2 selects e3 (detour_count=2, failed_edges={e1, e2})
+        # e3 fails -> detour_count (2) >= max_detours (2) -> fail closed with WorkflowInterruptedError!
+        # e4 must NEVER be dispatched.
+        with pytest.raises(WorkflowInterruptedError) as exc_info:
+            engine.execute(plan, page, manager=manager, allow_detour=True, max_detours=2)
+
+        err_msg = str(exc_info.value)
+        assert "maximum detour limit (2) reached" in err_msg
+        assert "edge-fail-1" in err_msg
+        assert "edge-fail-2" in err_msg
+        assert "edge-fail-3" in err_msg
+        assert page.locator("#status").inner_text() == "idle"  # success-btn was never clicked!
+    finally:
+        manager.close()
+
+
+# 12. Negative Regression: Applying Stale Repair Candidate with Mismatched Recipe Content Digest Raises StaleRepairError
+def test_stale_repair_candidate_rejected(tmp_path):
+    store = RecipeStore(root=tmp_path / "recipes")
+
+    bundle_v1 = AnchorBundle(
+        candidates=[
+            AnchorCandidate(kind="test_attr", selector='[data-testid="old-btn"]', score=0.95),
+            AnchorCandidate(kind="role_name", role="button", name="Old Button", score=0.90),
+        ]
+    )
+
+    recipe = Recipe(
+        id="test-stale-repair",
+        name="Recipe for Stale Repair Test",
+        domain_pattern="*",
+        steps=[RecipeStep(action="click", target=bundle_v1)],
+    )
+    store.save(recipe)
+
+    # Initial saved state
+    initial_recipe = store.get(recipe.id)
+    v1_digest = initial_recipe.lifecycle.content_digest
+    v1_generation = initial_recipe.lifecycle.generation
+    assert v1_digest is not None
+    assert v1_generation == 1
+
+    # Mutate canonical recipe to generation 2 (simulating a developer/canonical recipe update)
+    recipe.steps[0].action = "fill"
+    recipe.steps[0].value = "New text"
+    store.save(recipe)
+
+    v2_recipe = store.get(recipe.id)
+    v2_digest = v2_recipe.lifecycle.content_digest
+    v2_generation = v2_recipe.lifecycle.generation
+    assert v2_generation == 2
+    assert v2_digest != v1_digest
+
+    # Now an old repair candidate captured against generation 1 / v1_digest is submitted
+    stale_repair = RepairCandidate(
+        recipe_id=recipe.id,
+        step_index=0,
+        broken_candidate={"kind": "test_attr", "selector": '[data-testid="old-btn"]', "score": 0.95},
+        healed_candidate={"kind": "role_name", "role": "button", "name": "Healed Button", "score": 0.91},
+        confidence=0.91,
+        recipe_generation=v1_generation,
+        recipe_content_digest=v1_digest,  # Mismatched against current canonical v2_digest!
+    )
+    store.record_repair_candidate(stale_repair)
+
+    # Applying the stale repair MUST fail closed with StaleRepairError
+    with pytest.raises(StaleRepairError) as exc_info:
+        store.apply_repair_candidate(stale_repair.id, actor="offline_learner")
+
+    assert "does not match canonical recipe digest" in str(exc_info.value)
+
+    # Invariant: Recipe on disk was untouched and remains at generation 2 with v2_digest
+    after_recipe = store.get(recipe.id)
+    assert after_recipe.lifecycle.generation == 2
+    assert after_recipe.lifecycle.content_digest == v2_digest

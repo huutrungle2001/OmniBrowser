@@ -84,6 +84,11 @@ RISK_RANKS = {
     RiskClass.R2_LOCAL_MUTABLE: 2,
     RiskClass.R3_PERSISTENT_MUTATION: 3,
     RiskClass.R4_IRREVERSIBLE: 4,
+    "R0": 0,
+    "R1": 1,
+    "R2": 2,
+    "R3": 3,
+    "R4": 4,
 }
 
 RISK_COST_WEIGHTS = {
@@ -234,7 +239,8 @@ class StateTransitionGraph:
         excluded_edge_ids: set[str] | None = None,
         *,
         excluded_edges: set[str] | list[str] | None = None,
-        max_allowed_risk: str | None = None,
+        max_allowed_risk: RiskClass | str = RiskClass.R4_IRREVERSIBLE,
+        allow_r4: bool = False,
     ) -> list[TransitionEdge] | None:
         """
         Find an alternate lowest-cost path from start_state_id to end_state_id
@@ -250,7 +256,7 @@ class StateTransitionGraph:
         if excluded_edges:
             excluded.update(excluded_edges)
 
-        max_risk_rank = RISK_RANKS.get(max_allowed_risk, 4) if max_allowed_risk else 4
+        max_risk_rank = RISK_RANKS.get(max_allowed_risk, 4) if max_allowed_risk is not None else 4
 
         # Priority queue entries: (cost, current_state, path_edges)
         queue: list[tuple[float, str, list[TransitionEdge]]] = [(0.0, start_state_id, [])]
@@ -273,6 +279,8 @@ class StateTransitionGraph:
 
                 edge_risk_rank = RISK_RANKS.get(edge.risk_class, 2)
                 if edge_risk_rank > max_risk_rank:
+                    continue
+                if (edge.risk_class in {RiskClass.R4_IRREVERSIBLE, "R4"} or edge_risk_rank >= 4) and not allow_r4:
                     continue
 
                 next_cost = cost + edge.cost
@@ -382,15 +390,18 @@ class WorkflowEngine:
         manager: PageManager,
         allow_r4: bool = False,
         allow_detour: bool = True,
+        max_detours: int = 2,
         raise_on_unknown_effect: bool = False,
         raise_on_failure: bool = False,
     ) -> WorkflowExecutionResult:
         """
         Execute a planned workflow edge-by-edge.
-        Preserves all Milestone v2.4 invariants:
+        Preserves all Milestone v2.4/v2.6 invariants:
         - Canonical risk is re-evaluated from authoritative RecipeStore.
         - R4 authorization cannot be bypassed.
-        - UNKNOWN_SIDE_EFFECT halts subsequent execution immediately.
+        - UNKNOWN_SIDE_EFFECT halts subsequent execution immediately with ZERO detours.
+        - Detour alternate route planning strictly preserves original risk envelope.
+        - Dynamic replanning history maintains failed_edges monotonically and is bounded by max_detours.
         - State transition is verified after each edge.
         """
         params = dict(params or {})
@@ -409,7 +420,7 @@ class WorkflowEngine:
         plan.cumulative_risk = canonical_risk_class
 
         # 1. Global R4 Gate Check
-        if plan.cumulative_risk == RiskClass.R4_IRREVERSIBLE and not allow_r4:
+        if (plan.cumulative_risk in {RiskClass.R4_IRREVERSIBLE, "R4"} or canonical_max_risk_rank >= 4) and not allow_r4:
             raise RiskGateError(
                 f"Workflow plan '{plan.plan_id}' contains R4 (irreversible/destructive) edges. "
                 "Execution blocked without explicit allow_r4=True."
@@ -417,35 +428,80 @@ class WorkflowEngine:
 
         edge_results: list[dict[str, Any]] = []
         current_state = plan.start_state
+        goal_state = getattr(plan, "final_state", getattr(plan, "goal_state", None))
+        failed_edges: set[str] = set()
+        detour_count: int = 0
+        detour_taken: bool = False
+        completed_edges_count: int = 0
 
-        for idx, edge in enumerate(plan.edges):
+        edges_to_execute: list[tuple[TransitionEdge, bool]] = [(e, False) for e in plan.edges]
+
+        while edges_to_execute:
+            edge, is_detour = edges_to_execute.pop(0)
+
             # Canonical quarantine check before executing edge
             canonical_recipe = self.store.get(edge.recipe_id) if hasattr(self.store, "get") else None
             if canonical_recipe is not None and hasattr(canonical_recipe, "lifecycle") and canonical_recipe.lifecycle.state == RecipeLifecycleState.QUARANTINED:
                 q_reason = getattr(canonical_recipe.lifecycle, "quarantine_reason", "quarantined")
                 raise QuarantinedRecipeError(
-                    f"Workflow edge {idx} ('{edge.edge_id}') uses QUARANTINED recipe '{edge.recipe_id}' ({q_reason}). Execution blocked."
+                    f"Workflow edge ('{edge.edge_id}') uses QUARANTINED recipe '{edge.recipe_id}' ({q_reason}). Execution blocked."
                 )
 
             # 2. Per-edge R4 Gate Check
-            if edge.risk_class == RiskClass.R4_IRREVERSIBLE and not allow_r4:
+            edge_risk_rank = RISK_RANKS.get(edge.risk_class, 2)
+            if (edge.risk_class in {RiskClass.R4_IRREVERSIBLE, "R4"} or edge_risk_rank >= 4) and not allow_r4:
                 raise RiskGateError(
-                    f"Workflow edge {idx} ('{edge.edge_id}') requires R4 authorization. "
+                    f"Workflow edge ('{edge.edge_id}') requires R4 authorization. "
                     "Execution blocked without explicit allow_r4=True."
                 )
 
             # 3. Execute the edge's underlying recipe
             # Note: RecipeEngine inherently performs JIT Write Barrier and Transition-Aware Reconciliation
-            edge_res = self.recipe_engine.execute(
-                edge.recipe_id,
-                page,
-                params,
-                manager=manager,
-                allow_r4=allow_r4,
-            )
+            try:
+                edge_res = self.recipe_engine.execute(
+                    edge.recipe_id,
+                    page,
+                    params,
+                    manager=manager,
+                    allow_r4=allow_r4,
+                )
+            except UnknownSideEffectError as exc:
+                msg = (
+                    f"Workflow halted on edge '{edge.edge_id}' due to UnknownSideEffectError: {exc}. "
+                    "Further execution stopped to prevent destructive side effects."
+                )
+                edge_record = {
+                    "edge_index": len(edge_results),
+                    "edge_id": edge.edge_id,
+                    "from_state": edge.from_state,
+                    "to_state": edge.to_state,
+                    "recipe_id": edge.recipe_id,
+                    "risk_class": edge.risk_class,
+                    "ok": False,
+                    "outcome": ExecutionOutcome.UNKNOWN_SIDE_EFFECT,
+                    "reconciled": False,
+                    "message": str(exc),
+                    **({"detour": True} if is_detour else {}),
+                }
+                edge_results.append(edge_record)
+                if raise_on_unknown_effect:
+                    raise
+                return WorkflowExecutionResult(
+                    ok=False,
+                    plan_id=plan.plan_id,
+                    completed_edges=completed_edges_count,
+                    total_edges=len(edge_results) + len(edges_to_execute),
+                    current_state=current_state,
+                    cumulative_risk=plan.cumulative_risk,
+                    outcome=ExecutionOutcome.UNKNOWN_SIDE_EFFECT,
+                    failure_edge=edge.edge_id,
+                    message=msg,
+                    edge_results=edge_results,
+                    detour_taken=detour_taken,
+                )
 
             edge_record = {
-                "edge_index": idx,
+                "edge_index": len(edge_results),
                 "edge_id": edge.edge_id,
                 "from_state": edge.from_state,
                 "to_state": edge.to_state,
@@ -455,13 +511,15 @@ class WorkflowEngine:
                 "outcome": edge_res.outcome,
                 "reconciled": edge_res.reconciled,
                 "message": edge_res.message,
+                **({"detour": True} if is_detour else {}),
             }
             edge_results.append(edge_record)
 
             # 4. Critical Halt on UNKNOWN_SIDE_EFFECT (Composition Safety Invariant)
+            # DO NOT attempt any detour! Zero subsequent edges dispatched!
             if edge_res.outcome == ExecutionOutcome.UNKNOWN_SIDE_EFFECT:
                 msg = (
-                    f"Workflow halted on edge {idx} ('{edge.edge_id}') due to UNKNOWN_SIDE_EFFECT. "
+                    f"Workflow halted on edge '{edge.edge_id}' due to UNKNOWN_SIDE_EFFECT. "
                     "Further execution stopped to prevent destructive side effects."
                 )
                 if raise_on_unknown_effect:
@@ -469,90 +527,58 @@ class WorkflowEngine:
                 return WorkflowExecutionResult(
                     ok=False,
                     plan_id=plan.plan_id,
-                    completed_edges=idx,
-                    total_edges=len(plan.edges),
+                    completed_edges=completed_edges_count,
+                    total_edges=len(edge_results) + len(edges_to_execute),
                     current_state=current_state,
                     cumulative_risk=plan.cumulative_risk,
                     outcome=ExecutionOutcome.UNKNOWN_SIDE_EFFECT,
                     failure_edge=edge.edge_id,
                     message=msg,
                     edge_results=edge_results,
+                    detour_taken=detour_taken,
                 )
 
             # 5. Halt on standard SAFE_FAILURE (or attempt Alternate Transition Discovery)
             if not edge_res.ok:
+                failed_edges.add(edge.edge_id)
+                if hasattr(edge, "id") and edge.id:
+                    failed_edges.add(edge.id)
+
                 if allow_detour:
-                    excluded = {edge.edge_id, getattr(edge, "id", edge.edge_id)}
-                    goal = getattr(plan, "final_state", getattr(plan, "goal_state", None))
-                    detour = self.graph.find_alternate_path(edge.from_state, goal, excluded_edge_ids=excluded)
+                    if detour_count >= max_detours:
+                        raise WorkflowInterruptedError(
+                            f"Workflow interrupted: maximum detour limit ({max_detours}) reached. "
+                            f"Failed edges: {sorted(failed_edges)}"
+                        )
+
+                    detour = self.graph.find_alternate_path(
+                        current_state,
+                        goal_state,
+                        excluded_edge_ids=failed_edges,
+                        max_allowed_risk=plan.cumulative_risk,
+                        allow_r4=allow_r4,
+                    )
                     if detour:
-                        detour_failed = False
-                        for d_idx, d_edge in enumerate(detour):
-                            d_canonical = self.store.get(d_edge.recipe_id) if hasattr(self.store, "get") else None
-                            if d_canonical is not None and hasattr(d_canonical, "lifecycle") and d_canonical.lifecycle.state == RecipeLifecycleState.QUARANTINED:
-                                detour_failed = True
-                                break
-                            if d_edge.risk_class == RiskClass.R4_IRREVERSIBLE and not allow_r4:
-                                detour_failed = True
-                                break
+                        detour_count += 1
+                        detour_taken = True
+                        edges_to_execute = [(d_edge, True) for d_edge in detour]
+                        continue
 
-                            d_res = self.recipe_engine.execute(
-                                d_edge.recipe_id,
-                                page,
-                                params,
-                                manager=manager,
-                                allow_r4=allow_r4,
-                            )
-                            d_record = {
-                                "edge_index": len(edge_results),
-                                "edge_id": d_edge.edge_id,
-                                "from_state": d_edge.from_state,
-                                "to_state": d_edge.to_state,
-                                "recipe_id": d_edge.recipe_id,
-                                "risk_class": d_edge.risk_class,
-                                "ok": d_res.ok,
-                                "outcome": d_res.outcome,
-                                "reconciled": d_res.reconciled,
-                                "message": d_res.message,
-                                "detour": True,
-                            }
-                            edge_results.append(d_record)
-
-                            if not d_res.ok:
-                                detour_failed = True
-                                break
-
-                            current_state = d_edge.to_state
-
-                        if not detour_failed:
-                            return WorkflowExecutionResult(
-                                ok=True,
-                                plan_id=plan.plan_id,
-                                completed_edges=len(edge_results),
-                                total_edges=len(plan.edges) + len(detour) - 1,
-                                current_state=current_state,
-                                cumulative_risk=plan.cumulative_risk,
-                                outcome=ExecutionOutcome.CONFIRMED_SUCCESS,
-                                failure_edge=None,
-                                message=f"Workflow completed successfully via alternate detour route ({len(detour)} detour edges).",
-                                edge_results=edge_results,
-                                detour_taken=True,
-                            )
-
-                msg = f"Workflow failed on edge {idx} ('{edge.edge_id}'): {edge_res.message}"
+                msg = f"Workflow failed on edge '{edge.edge_id}': {edge_res.message}"
                 if raise_on_failure:
                     raise WorkflowInterruptedError(msg)
                 return WorkflowExecutionResult(
                     ok=False,
                     plan_id=plan.plan_id,
-                    completed_edges=idx,
-                    total_edges=len(plan.edges),
+                    completed_edges=completed_edges_count,
+                    total_edges=len(edge_results) + len(edges_to_execute),
                     current_state=current_state,
                     cumulative_risk=plan.cumulative_risk,
                     outcome=ExecutionOutcome.SAFE_FAILURE,
                     failure_edge=edge.edge_id,
                     message=msg,
                     edge_results=edge_results,
+                    detour_taken=detour_taken,
                 )
 
             # 6. Post-Edge State Transition Verification
@@ -560,20 +586,22 @@ class WorkflowEngine:
             if target_node:
                 # 6a. Route verification if pattern specified
                 if target_node.route_pattern and target_node.route_pattern != "*" and target_node.route_pattern not in page.url:
+                    edge_record["ok"] = False
                     msg = f"Post-edge state transition to '{edge.to_state}' failed: active URL '{page.url}' does not match pattern '{target_node.route_pattern}'"
                     if raise_on_failure:
                         raise WorkflowInterruptedError(msg)
                     return WorkflowExecutionResult(
                         ok=False,
                         plan_id=plan.plan_id,
-                        completed_edges=idx,
-                        total_edges=len(plan.edges),
+                        completed_edges=completed_edges_count,
+                        total_edges=len(edge_results) + len(edges_to_execute),
                         current_state=current_state,
                         cumulative_risk=plan.cumulative_risk,
                         outcome=ExecutionOutcome.SAFE_FAILURE,
                         failure_edge=edge.edge_id,
                         message=msg,
                         edge_results=edge_results,
+                        detour_taken=detour_taken,
                     )
 
                 # 6b. Anchor verification if required_anchors specified
@@ -582,33 +610,37 @@ class WorkflowEngine:
                     tree_nodes = obs.tree if hasattr(obs, "tree") else (obs.get("tree", []) if isinstance(obs, dict) else [])
                     missing = [ra for ra in target_node.required_anchors if not _find_anchor_in_tree(ra, tree_nodes)]
                     if missing:
+                        edge_record["ok"] = False
                         msg = f"Post-edge state transition to '{edge.to_state}' failed: missing required anchors {missing}"
                         if raise_on_failure:
                             raise WorkflowInterruptedError(msg)
                         return WorkflowExecutionResult(
                             ok=False,
                             plan_id=plan.plan_id,
-                            completed_edges=idx,
-                            total_edges=len(plan.edges),
+                            completed_edges=completed_edges_count,
+                            total_edges=len(edge_results) + len(edges_to_execute),
                             current_state=current_state,
                             cumulative_risk=plan.cumulative_risk,
                             outcome=ExecutionOutcome.SAFE_FAILURE,
                             failure_edge=edge.edge_id,
                             message=msg,
                             edge_results=edge_results,
+                            detour_taken=detour_taken,
                         )
 
+            completed_edges_count += 1
             current_state = edge.to_state
 
         return WorkflowExecutionResult(
             ok=True,
             plan_id=plan.plan_id,
-            completed_edges=len(plan.edges),
-            total_edges=len(plan.edges),
+            completed_edges=completed_edges_count,
+            total_edges=len(edge_results),
             current_state=current_state,
             cumulative_risk=plan.cumulative_risk,
             outcome=ExecutionOutcome.CONFIRMED_SUCCESS,
             failure_edge=None,
-            message="Workflow completed successfully with all transitions verified.",
+            message="Workflow completed successfully with all transitions verified." if not detour_taken else "Workflow completed successfully via alternate detour route.",
             edge_results=edge_results,
+            detour_taken=detour_taken,
         )

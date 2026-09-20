@@ -75,6 +75,11 @@ class AnchorAmbiguous(OmniBrowserError, ValueError):
     exit_code = ExitCode.INVALID_INPUT
 
 
+class StaleRepairError(OmniBrowserError, ValueError):
+    """Raised when an offline repair candidate is applied against a mismatched recipe digest or generation."""
+    exit_code = ExitCode.INVALID_INPUT
+
+
 @dataclass(frozen=True, slots=True)
 class DOMNodeRef:
     """An opaque reference valid only for one frame document epoch."""
@@ -217,6 +222,11 @@ class Lease:
 
 
 class RiskClass:
+    R0 = "R0"
+    R1 = "R1"
+    R2 = "R2"
+    R3 = "R3"
+    R4 = "R4"
     R0_READONLY = "R0"             # observe, inspect, non-mutating eval
     R1_REVERSIBLE_NAV = "R1"       # tab navigation, filters, accordion toggle
     R2_LOCAL_MUTABLE = "R2"        # form fills, checkboxes, drafts
@@ -323,6 +333,8 @@ class RepairCandidate:
     broken_candidate: dict[str, Any] = field(default_factory=dict)
     healed_candidate: dict[str, Any] = field(default_factory=dict)
     confidence: float = 0.0
+    recipe_generation: int = 1
+    recipe_content_digest: str | None = None
     id: str = field(default_factory=lambda: uuid4().hex[:12])
     context: dict[str, Any] = field(default_factory=dict)
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -335,6 +347,8 @@ class RepairCandidate:
             "broken_candidate": self.broken_candidate,
             "healed_candidate": self.healed_candidate,
             "confidence": self.confidence,
+            "recipe_generation": self.recipe_generation,
+            "recipe_content_digest": self.recipe_content_digest,
             "context": self.context,
             "timestamp": self.timestamp,
         }
@@ -350,6 +364,8 @@ class RepairCandidate:
             broken_candidate=dict(data.get("broken_candidate", {})),
             healed_candidate=dict(data.get("healed_candidate", {})),
             confidence=float(data.get("confidence", 0.0)),
+            recipe_generation=int(data.get("recipe_generation", 1)),
+            recipe_content_digest=data.get("recipe_content_digest"),
             context=dict(data.get("context", {})),
             timestamp=str(data.get("timestamp", datetime.now(timezone.utc).isoformat())),
         )

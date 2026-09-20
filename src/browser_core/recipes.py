@@ -47,6 +47,7 @@ from .contracts import (
     RiskGateError,
     SafetySpec,
     SemanticAnchor,
+    StaleRepairError,
     UnknownSideEffectError,
 )
 from .engine import act
@@ -1408,6 +1409,17 @@ class RecipeStore:
         if recipe is None:
             raise ValueError(f"Recipe not found: {repair.recipe_id}")
 
+        # Verification of generation / content digest binding
+        current_digest = recipe.lifecycle.content_digest if (hasattr(recipe, "lifecycle") and recipe.lifecycle is not None) else None
+        if current_digest is None:
+            current_digest = compute_recipe_content_digest(recipe)
+
+        if repair.recipe_content_digest is None or repair.recipe_content_digest != current_digest:
+            raise StaleRepairError(
+                f"Stale repair candidate '{repair_id}': candidate digest '{repair.recipe_content_digest}' "
+                f"does not match canonical recipe digest '{current_digest}' (generation {getattr(recipe.lifecycle, 'generation', 1)})."
+            )
+
         if repair.step_index >= len(recipe.steps):
             raise IndexError(
                 f"Repair step index {repair.step_index} out of range (recipe has {len(recipe.steps)} steps)"
@@ -1614,7 +1626,12 @@ class AnchorResolver:
         page: Page,
         target: str | AnchorBundle | dict[str, Any],
         mutating: bool = True,
+        risk_class: RiskClass | str = RiskClass.R1,
     ) -> tuple[Any, AnchorCandidate | None, float]:
+        clean_risk = str(getattr(risk_class, "value", risk_class)).strip().upper()
+        is_r4 = clean_risk in {RiskClass.R4_IRREVERSIBLE, "R4"}
+        is_r3 = clean_risk in {RiskClass.R3_PERSISTENT_MUTATION, "R3"}
+
         if isinstance(target, str):
             locator = page.locator(target)
             count = locator.count()
@@ -1653,6 +1670,20 @@ class AnchorResolver:
 
         candidates = sorted(bundle.candidates, key=lambda c: getattr(c, "score", 0.80), reverse=True)
         for candidate in candidates:
+            cand_score = float(getattr(candidate, "score", 0.80))
+            is_text_only = (candidate.kind == "text") or (not candidate.selector and not candidate.role and bool(candidate.name))
+            is_neighborhood = (candidate.kind == "neighborhood")
+
+            # Risk-aware candidate qualification floor (R3 / R4):
+            # Count == 1 establishes uniqueness, NOT authorization to mutate high-risk targets.
+            # For R3: require candidate score >= 0.80; text-only candidates are strictly disqualified.
+            # For R4: require candidate score >= 0.90; text-only and generic neighborhood candidates are strictly disqualified.
+            if is_r4:
+                if cand_score < 0.90 or is_text_only or is_neighborhood:
+                    continue
+            elif is_r3:
+                if cand_score < 0.80 or is_text_only:
+                    continue
             try:
                 kind = candidate.kind
                 if kind in ("test_attr", "scoped_css", "neighborhood"):
@@ -2041,7 +2072,11 @@ class RecipeEngine:
                     if step_risk in {RiskClass.R3_PERSISTENT_MUTATION, RiskClass.R4_IRREVERSIBLE}:
                         persistent_mutation_started = True
 
-                step_res = self._execute_step(page, page_manager, step.action, target, value, expect, timeout, on_action_dispatched=mark_mutation_started)
+                step_res = self._execute_step(
+                    page, page_manager, step.action, target, value, expect, timeout,
+                    on_action_dispatched=mark_mutation_started,
+                    risk_class=step_risk,
+                )
                 loc, resolved_cand, cand_score = step_res if step_res is not None else (None, None, 1.0)
 
                 is_bundle = isinstance(target, AnchorBundle) or (isinstance(target, dict) and "candidates" in target)
@@ -2053,12 +2088,22 @@ class RecipeEngine:
                     if p_dict != r_dict:
                         import sys
                         print(f"[HEALED] Step {index}: {resolved_cand.kind} fallback (conf: {cand_score:.2f})", file=sys.stderr)
+                        rec_gen = 1
+                        rec_digest = None
+                        if hasattr(recipe, "lifecycle") and recipe.lifecycle is not None:
+                            rec_gen = getattr(recipe.lifecycle, "generation", 1)
+                            rec_digest = getattr(recipe.lifecycle, "content_digest", None)
+                        if rec_digest is None and isinstance(recipe, Recipe):
+                            rec_digest = compute_recipe_content_digest(recipe)
+
                         repair = RepairCandidate(
                             recipe_id=recipe.id if hasattr(recipe, "id") else str(recipe),
                             step_index=index,
                             broken_candidate=p_dict,
                             healed_candidate=r_dict,
                             confidence=cand_score,
+                            recipe_generation=rec_gen,
+                            recipe_content_digest=rec_digest,
                             context={"action": step.action, "url": page.url},
                         )
                         if self.store is not None and hasattr(self.store, "record_repair_candidate"):
@@ -2180,8 +2225,17 @@ class RecipeEngine:
     run = execute
 
     @staticmethod
-    def _execute_step(page: Page, manager: PageManager | None, action: str, target: Any, value: Any,
-                      expect: dict[str, Any], timeout: int, on_action_dispatched: Any = None) -> tuple[Any, AnchorCandidate | None, float]:
+    def _execute_step(
+        page: Page,
+        manager: PageManager | None,
+        action: str,
+        target: Any,
+        value: Any,
+        expect: dict[str, Any],
+        timeout: int,
+        on_action_dispatched: Any = None,
+        risk_class: RiskClass | str = RiskClass.R1,
+    ) -> tuple[Any, AnchorCandidate | None, float]:
         if action == "eval":
             if on_action_dispatched:
                 on_action_dispatched()
@@ -2207,7 +2261,7 @@ class RecipeEngine:
         score = 1.0
         try:
             locator, resolved_cand, score = AnchorResolver.resolve(
-                page, target, mutating=action in {"click", "fill", "select", "upload"}
+                page, target, mutating=action in {"click", "fill", "select", "upload"}, risk_class=risk_class
             )
         except (AnchorNotFound, AnchorAmbiguous):
             raise

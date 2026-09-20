@@ -165,8 +165,7 @@ def cmd_goto(args):
     playwright, browser, _context, page = _legacy_page(args)
     try:
         print(f"Navigating to {args.url}...")
-        page.goto(args.url)
-        page.wait_for_load_state("domcontentloaded")
+        page.goto(args.url, wait_until="domcontentloaded")
         print(f"Page title: {page.title()}")
         print(f"Current URL: {page.url}")
     finally:

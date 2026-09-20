@@ -96,16 +96,24 @@ def ephemeral_cdp_url(ephemeral_user_data_dir):
         stderr=subprocess.DEVNULL,
     )
     active_port_file = Path(ephemeral_user_data_dir, "DevToolsActivePort")
+    port: int | None = None
     deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and not active_port_file.exists():
+    while time.monotonic() < deadline:
+        if active_port_file.exists():
+            try:
+                lines = active_port_file.read_text(encoding="utf-8").splitlines()
+                if lines and lines[0].strip().isdigit():
+                    port = int(lines[0].strip())
+                    break
+            except Exception:
+                pass
         if process.poll() is not None:
             pytest.fail("Ephemeral Chromium exited before exposing CDP.")
         time.sleep(0.05)
-    if not active_port_file.exists():
+    if port is None:
         process.terminate()
-        pytest.fail("Ephemeral Chromium did not create DevToolsActivePort.")
+        pytest.fail("Ephemeral Chromium did not create valid DevToolsActivePort.")
 
-    port = int(active_port_file.read_text(encoding="utf-8").splitlines()[0])
     assert port != 17082
     try:
         yield f"http://127.0.0.1:{port}"
