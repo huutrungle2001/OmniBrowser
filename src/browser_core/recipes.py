@@ -7,7 +7,15 @@ the page no longer matches the recorded procedure.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+import sys
+from dataclasses import asdict, dataclass as _dataclass, field
+
+if sys.version_info < (3, 10):
+    def dataclass(*args, **kwargs):
+        kwargs.pop("slots", None)
+        return _dataclass(*args, **kwargs)
+else:
+    dataclass = _dataclass
 import fcntl
 import fnmatch
 import json
