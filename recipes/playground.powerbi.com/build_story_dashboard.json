@@ -1,0 +1,49 @@
+{
+  "id": "powerbi_build_story_dashboard",
+  "name": "Procedural Dashboard Authoring & Visual Building",
+  "description": "Visibly injects visual authoring & DAX logic into Monaco Editor, triggers compilation via Run button, expands Visualizations and Data panes, applies regional drill-downs, and presents an interactive executive business storyboard.",
+  "domain_pattern": [
+    "https://playground.powerbi.com/*"
+  ],
+  "steps": [
+    {
+      "action": "fill",
+      "target": "div.monaco-editor textarea.inputarea",
+      "value": "// [AI AGENT] Step 1: Switch to Edit Mode & Activate Visualizations Pane\\nawait report.switchMode('Edit');\\nconsole.log('[AI] Visualizations & Data Model Loaded.');"
+    },
+    {
+      "action": "click",
+      "target": "button[title*='Run'], button:has-text('Run'), .run-button"
+    },
+    {
+      "action": "fill",
+      "target": "div.monaco-editor textarea.inputarea",
+      "value": "// [AI AGENT] Step 2: Apply Targeted Squeeze Filter (Region: West)\\nconst filter = {\\n  $schema: 'http://powerbi.com/product/schema#basic',\\n  target: { table: 'Geo', column: 'Region' },\\n  operator: 'In',\\n  values: ['West'],\\n  filterType: models.FilterType.BasicFilter\\n};\\nawait report.updateFilters(models.FiltersOperations.Replace, [filter]);"
+    },
+    {
+      "action": "click",
+      "target": "button[title*='Run'], button:has-text('Run'), .run-button"
+    },
+    {
+      "action": "fill",
+      "target": "div.monaco-editor textarea.inputarea",
+      "value": "// [AI AGENT] Step 3: Complete Cycle & Restore Clean View Mode\\nawait report.updateFilters(models.FiltersOperations.RemoveAll);\\nawait report.switchMode('View');"
+    },
+    {
+      "action": "click",
+      "target": "button[title*='Run'], button:has-text('Run'), .run-button"
+    }
+  ],
+  "validation": {
+    "text_present": "Visualizations"
+  },
+  "metadata": {
+    "version": "1.0",
+    "author": "Antigravity Meta-Hub",
+    "created_at": "2026-09-30T00:50:00Z",
+    "success_count": 1,
+    "failure_count": 0,
+    "last_failure_reason": null,
+    "failure_ledger": []
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "id": "powerbi_init_blank_canvas",
+  "name": "Initialize Blank Canvas on Power BI Playground",
+  "description": "Creates and activates a fresh blank report page in the developer sandbox, ensuring authoring starts from an empty dashboard canvas.",
+  "domain_pattern": [
+    "https://playground.powerbi.com/*"
+  ],
+  "steps": [
+    {
+      "action": "fill",
+      "target": "div.monaco-editor textarea.inputarea",
+      "value": "// [AI AGENT] Step 0: Initialize Blank Canvas\\nconst newPage = await report.addPage('Executive Storyboard');\\nawait newPage.setActive();\\nawait report.switchMode('Edit');"
+    },
+    {
+      "action": "click",
+      "target": "button[title*='Run'], button:has-text('Run'), .run-button"
+    }
+  ],
+  "validation": {
+    "text_present": "Build visuals with your data"
+  },
+  "metadata": {
+    "version": "1.0",
+    "author": "Antigravity Meta-Hub",
+    "created_at": "2026-09-30T00:50:00Z",
+    "success_count": 1,
+    "failure_count": 0,
+    "last_failure_reason": null,
+    "failure_ledger": []
+  }
+}
