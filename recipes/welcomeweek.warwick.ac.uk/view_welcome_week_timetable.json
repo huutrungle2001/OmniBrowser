@@ -1,0 +1,24 @@
+{
+  "id": "warwick_view_welcome_week_timetable",
+  "name": "Switch to Welcome Week Timetable on Warwick Welcome Portal",
+  "description": "Navigate to the Next Week view on welcomeweek.warwick.ac.uk to display full induction and fair schedules.",
+  "domain_pattern": [
+    "https://welcomeweek.warwick.ac.uk/*"
+  ],
+  "steps": [
+    {
+      "action": "click",
+      "target": "a:has-text('Next week'), button:has-text('Next week'), .fc-next-button"
+    }
+  ],
+  "validation": {
+    "text_present": "AAI"
+  },
+  "metadata": {
+    "version": "1.0",
+    "success_count": 0,
+    "failure_count": 0,
+    "last_failure_reason": null,
+    "failure_ledger": []
+  }
+}

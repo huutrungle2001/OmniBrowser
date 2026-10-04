@@ -1,0 +1,14 @@
+{
+  "id": "dataannotation_signup_step1",
+  "name": "Fill DataAnnotation Signup Step 1",
+  "description": "Fill First Name, Last Name, and Warwick Email on DataAnnotation worker signup form.",
+  "domain_pattern": ["https://app.dataannotation.tech/worker_signup*"],
+  "steps": [
+    {"action": "fill", "target": "input[placeholder*='First name'], #user_first_name", "value": "{{first_name}}"},
+    {"action": "fill", "target": "input[placeholder*='Last name'], #user_last_name", "value": "{{last_name}}"},
+    {"action": "fill", "target": "input[placeholder*='Email'], #user_email", "value": "{{email}}"},
+    {"action": "click", "target": "button:has-text('Continue')"}
+  ],
+  "validation": {"text_present": "Almost done"},
+  "metadata": {"version": "1.0", "success_count": 1, "failure_count": 0, "last_failure_reason": null, "failure_ledger": []}
+}

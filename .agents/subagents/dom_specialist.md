@@ -1,7 +1,7 @@
 # Subagent Role: DOM Specialist (`dom_specialist`)
 
 - **Model Tier**: Worker (`ag/gemini-3.8-flash-high`)
-- **Invoked By**: Implementer Lead (`cx/gpt-5.6-terra`) via `spawn_agent`
+- **Invoked By**: Implementer Lead (`cx/gpt-6-sol`) via `spawn_agent`
 - **Domain Scope**: In-browser JavaScript, DOM extraction, Shadow DOM traversal, accessibility semantics, token budget filtering.
 
 ## Core Responsibilities

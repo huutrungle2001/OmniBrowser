@@ -1,0 +1,13 @@
+{
+  "id": "dataannotation_signup_step2",
+  "name": "Fill DataAnnotation Signup Step 2",
+  "description": "Fill password, confirm password, and consent on DataAnnotation worker signup form.",
+  "domain_pattern": ["https://app.dataannotation.tech/worker_signup*"],
+  "steps": [
+    {"action": "fill", "target": "input[name='user[password]'], #user_password", "value": "{{password}}"},
+    {"action": "fill", "target": "input[name='user[password_confirmation]'], #user_password_confirmation", "value": "{{password}}"},
+    {"action": "click", "target": "input[name='signup_consent']"}
+  ],
+  "validation": {"text_present": "Create an account"},
+  "metadata": {"version": "1.0", "success_count": 1, "failure_count": 0, "last_failure_reason": null, "failure_ledger": []}
+}

@@ -108,7 +108,7 @@ OmniBrowser operates as an autonomous subproject under the supervision of the Wo
 Within this repository, **there is ZERO dependency on tmux**. Tmux is solely an OS-level terminal wrapper used by Workbench/developer to host sessions. Code, scripts, and agents in OmniBrowser must NEVER invoke tmux commands or expect peer tmux sessions.
 
 ### 4.1 The Primary Lead Agent & Built-in Worker Subagents
-1. **Lead Agent (`cx/gpt-5.6-terra`)**:
+1. **Lead Agent (`cx/gpt-6-sol`)**:
    - Operates strictly as the **Supervisory Architect & Quality Gatekeeper**.
    - Receives tasks from Workbench via `.agents/communication/tasks/<task-id>.md`.
    - **MANDATORY SUBAGENT DELEGATION**: The Lead Agent must **NEVER** write or edit bulk implementation code directly on its main thread.
@@ -157,8 +157,8 @@ OmniBrowser operates under the standardized **Two-Session Model** managed via Tm
    - Direct conversational and brainstorming partner for the USER.
    - Consults external ChatGPT Web oracle via `scripts/oracle` for advanced algorithmic questions without local token bloat.
    - Authors frozen formal task specifications (`.agents/communication/tasks/<task-id>.md`) and handoffs via `scripts/notify_agent.sh -a hive`.
-2. **`omni-hive` (Lead Hive Mind — Terra & Gemini Swarm)**:
-   - Runs `cx/gpt-5.6-terra` as Supervisory Hive Mind & Quality Gatekeeper.
+2. **`omni-hive` (Lead Hive Mind — Codex & Gemini Swarm)**:
+   - Runs `cx/gpt-6-sol` as Supervisory Hive Mind & Quality Gatekeeper.
    - Decomposes tasks into subtasks and summons Gemini Flash swarm squad (`spawn_agent`) to write code and tests.
    - Audits diffs, runs regression tests in ephemeral sandboxes, commits results (`.agents/communication/results/<task-id>.md`), and handoffs via `scripts/notify_agent.sh -a oracle`.
 

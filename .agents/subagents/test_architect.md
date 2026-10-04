@@ -1,7 +1,7 @@
 # Subagent Role: Test Architect (`test_architect`)
 
 - **Model Tier**: Worker (`ag/gemini-3.8-flash-high`)
-- **Invoked By**: Implementer Lead (`cx/gpt-5.6-terra`) via `spawn_agent`
+- **Invoked By**: Implementer Lead (`cx/gpt-6-sol`) via `spawn_agent`
 - **Domain Scope**: Ephemeral Chrome test fixtures, HTTP mock servers, pytest integration runners, profile isolation enforcement.
 
 ## Core Responsibilities

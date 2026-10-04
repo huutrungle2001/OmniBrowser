@@ -1,0 +1,104 @@
+{
+  "id": "powerbi_web_upload_and_build",
+  "name": "Power BI Web: Upload CSV & Build Executive Dashboard",
+  "description": "End-to-end automation for app.powerbi.com: uploads business CSV via Power Query, provisions semantic model, launches blank canvas, expands fields, and constructs multi-visual storytelling executive dashboard.",
+  "domain_pattern": [
+    "https://app.powerbi.com/*"
+  ],
+  "steps": [
+    {
+      "step": 1,
+      "name": "Select CSV Data Source",
+      "action": "click",
+      "target": "mat-card:has-text('CSV')"
+    },
+    {
+      "step": 2,
+      "name": "Select Upload File Option",
+      "frame": "f1",
+      "action": "click",
+      "target": "label[for*='UploadFile']"
+    },
+    {
+      "step": 3,
+      "name": "Upload CSV Data File",
+      "frame": "f1",
+      "action": "upload",
+      "target": "input.file-input",
+      "value": "business_sales_data.csv"
+    },
+    {
+      "step": 4,
+      "name": "Confirm Connection",
+      "action": "click",
+      "target": "button:has-text('Next')"
+    },
+    {
+      "step": 5,
+      "name": "Confirm Data Preview",
+      "action": "click",
+      "target": "button:has-text('Next')"
+    },
+    {
+      "step": 6,
+      "name": "Create Report from Query",
+      "action": "click",
+      "target": "#mat-button-toggle-0-button"
+    },
+    {
+      "step": 7,
+      "name": "Name Semantic Model",
+      "action": "fill",
+      "target": "input[aria-label='Semantic model name']",
+      "value": "Executive_Sales_Performance"
+    },
+    {
+      "step": 8,
+      "name": "Confirm Model Creation",
+      "action": "click",
+      "target": "button:has-text('Create')"
+    },
+    {
+      "step": 9,
+      "name": "Expand Data Fields",
+      "action": "click",
+      "target": "#table_business_sales_data"
+    },
+    {
+      "step": 10,
+      "name": "Build Column Chart Visual",
+      "action": "click",
+      "target": "button[aria-label='Clustered column chart']",
+      "fields": ["Region", "GrossRevenue"]
+    },
+    {
+      "step": 11,
+      "name": "Build Donut Chart Visual",
+      "action": "click",
+      "target": "button[aria-label='Donut chart']",
+      "fields": ["Category", "NetProfit"]
+    },
+    {
+      "step": 12,
+      "name": "Build Line Chart Visual",
+      "action": "click",
+      "target": "button[aria-label='Line chart']",
+      "fields": ["Month", "NetRevenue"]
+    },
+    {
+      "step": 13,
+      "name": "Format Executive Layout",
+      "action": "layout",
+      "arrangement": "2x2_executive_grid"
+    }
+  ],
+  "metadata": {
+    "version": "1.0",
+    "author": "Antigravity Meta-Hub",
+    "created_at": "2026-09-30T12:15:00Z",
+    "success_count": 1,
+    "failure_count": 0,
+    "last_failure_reason": null,
+    "failure_ledger": []
+  }
+}

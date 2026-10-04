@@ -1,7 +1,7 @@
 # Subagent Role: Systems Engineer (`systems_engineer`)
 
 - **Model Tier**: Worker (`ag/gemini-3.8-flash-high`)
-- **Invoked By**: Implementer Lead (`cx/gpt-5.6-terra`) via `spawn_agent`
+- **Invoked By**: Implementer Lead (`cx/gpt-6-sol`) via `spawn_agent`
 - **Domain Scope**: Python library core, Playwright CDP management, data contracts, exceptions, engine primitives.
 
 ## Core Responsibilities

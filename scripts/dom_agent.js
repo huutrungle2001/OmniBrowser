@@ -55,7 +55,7 @@
   };
 
   const isVisible = (element) => {
-    if (!(element instanceof Element) || element.closest("[hidden], [inert], [aria-hidden='true']")) {
+    if (!(element instanceof Element) || element.closest("[hidden], [inert]") || element.getAttribute("aria-hidden") === "true") {
       return false;
     }
     const style = getComputedStyle(element);

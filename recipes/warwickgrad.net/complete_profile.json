@@ -1,0 +1,91 @@
+{
+  "id": "warwickgrad_fill_profile",
+  "name": "Complete Alumni Profile on WarwickGrad",
+  "description": "Comprehensive recipe to populate and synchronize the verified personal, academic, professional, contact, and address records on warwickgrad.net.",
+  "domain_pattern": [
+    "https://www.warwickgrad.net/*"
+  ],
+  "sections": {
+    "headline": {
+      "trigger": "button:has-text('Edit')",
+      "fields": {
+        "headline": "MSc Applied Artificial Intelligence at University of Warwick | AI & Full-Stack Engineer"
+      }
+    },
+    "bio": {
+      "trigger": "button:has-text('Edit')",
+      "fields": {
+        "bio": "MSc student in Applied Artificial Intelligence at the University of Warwick (WMG Excellence Scholarship recipient). Background in combinatorial optimization, mathematical modeling, and full-stack software development. Previously published peer-reviewed research on vehicle-drone synchronization with Springer (CITA 2025), won 1st prize in the global Solana Consumer Hackathon, and achieved two Bronze Medals in the Vietnam National Mathematical Olympiad. Experienced in building production AI systems and legacy C++ software (Toshiba Software Vietnam). Passionate about operational research, agentic workflows, and collaborating on high-impact AI engineering projects."
+      }
+    },
+    "personal_details": {
+      "trigger": "button:has-text('Edit')",
+      "fields": {
+        "title": "Mr",
+        "first_name": "Trung",
+        "middle_name": "Huu",
+        "last_name": "Le",
+        "preferred_name": "Trung",
+        "date_of_birth": "10/08/2001",
+        "sex": "Male",
+        "nationality": "Vietnamese"
+      }
+    },
+    "education_details": {
+      "official": {
+        "department": "Warwick Manufacturing Group (WMG)",
+        "course": "Applied Artificial Intelligence",
+        "degree": "Master of Science (MSc)",
+        "year_started": "2026",
+        "year_graduated": "2027"
+      },
+      "other": {
+        "institution": "Phenikaa University",
+        "degree": "Bachelor of Information Technology (B.IT)",
+        "course": "Artificial Intelligence and Data Science",
+        "year_started": "2019",
+        "year_graduated": "2025",
+        "city": "Hanoi",
+        "country": "Vietnam"
+      }
+    },
+    "professional_history": {
+      "position": "Software Engineer",
+      "organisation": "Toshiba Software Development Vietnam (TSDV)",
+      "department": "Software Engineering",
+      "industry": "Software & Technology",
+      "start_date": "2023",
+      "end_date": "2024",
+      "employment_type": "Full-time / Internship",
+      "city": "Hanoi",
+      "country": "Vietnam",
+      "description": "Engineered and maintained a large-scale enterprise newspaper-composition system in C++. Diagnosed nested pointer networks, complex data structures, and memory leaks across the shared UI component library."
+    },
+    "contact_details": {
+      "email": "Trung.Le@warwick.ac.uk",
+      "mobile": "+44 7455 344678",
+      "website": "https://github.com/huutrungle2001",
+      "linkedin": "https://linkedin.com/in/huutrungle2001"
+    },
+    "address": {
+      "address_line_1": "Room A-806-A, Arundel House",
+      "address_line_2": "Whitefriars Lane",
+      "city": "Coventry",
+      "postcode": "CV1 2NA",
+      "country": "United Kingdom"
+    },
+    "other_careers_support": {
+      "sharing_career_story": true,
+      "supporting_student_enterprise": true,
+      "advise_prospective_students": true
+    }
+  },
+  "metadata": {
+    "version": "1.0",
+    "verified_source": "database/facts/",
+    "success_count": 1,
+    "failure_count": 0,
+    "last_failure_reason": null,
+    "failure_ledger": []
+  }
+}

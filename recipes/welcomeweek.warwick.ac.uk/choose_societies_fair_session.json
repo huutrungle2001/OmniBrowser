@@ -1,0 +1,24 @@
+{
+  "id": "warwick_choose_societies_fair_session",
+  "name": "Open Choose Session Modal for Warwick SU Societies Fair",
+  "description": "Click 'Choose session' button to select a time slot for the Societies Fair at Sports Hub.",
+  "domain_pattern": [
+    "https://welcomeweek.warwick.ac.uk/*"
+  ],
+  "steps": [
+    {
+      "action": "click",
+      "target": "button.btn-primary:has-text('Choose session')"
+    }
+  ],
+  "validation": {
+    "text_present": "Societies Fair"
+  },
+  "metadata": {
+    "version": "1.0",
+    "success_count": 0,
+    "failure_count": 0,
+    "last_failure_reason": null,
+    "failure_ledger": []
+  }
+}

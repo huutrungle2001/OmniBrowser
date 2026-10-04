@@ -1,0 +1,24 @@
+{
+  "id": "warwick_tabula_view_timetable",
+  "name": "View and Export Timetable on Warwick Tabula",
+  "description": "Navigate to the student personalised timetable page on Tabula (profiles/view/me/timetable) to observe scheduled teaching blocks, syndicate sessions, and export iCal feeds.",
+  "domain_pattern": [
+    "https://tabula.warwick.ac.uk/*"
+  ],
+  "steps": [
+    {
+      "action": "goto",
+      "url": "https://tabula.warwick.ac.uk/profiles/view/me/timetable"
+    }
+  ],
+  "validation": {
+    "text_present": "Timetable"
+  },
+  "metadata": {
+    "version": "1.0",
+    "success_count": 1,
+    "failure_count": 0,
+    "last_failure_reason": null,
+    "failure_ledger": []
+  }
+}

@@ -199,10 +199,22 @@ def cmd_goto(args):
 def cmd_eval(args):
     playwright, browser, _context, page = _legacy_page(args)
     try:
-        print("Result:", page.evaluate(args.expression))
+      target = page
+      frame_token = getattr(args, "frame", None)
+      if frame_token:
+        token_str = frame_token.removeprefix("f")
+        if token_str.isdigit() and int(token_str) < len(page.frames):
+          target = page.frames[int(token_str)]
+        else:
+          for f in page.frames:
+            if frame_token in f.url or frame_token in f.name:
+              target = f
+              break
+      print("Result:", target.evaluate(args.expression))
     finally:
-        browser.close()
-        playwright.stop()
+      browser.close()
+      playwright.stop()
+
 
 
 def _raw_cdp_screenshot(
@@ -210,6 +222,8 @@ def _raw_cdp_screenshot(
     output_path: str,
     match: str | None = None,
     context_id: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
 ) -> bool:
     """Capture a screenshot directly via raw CDP WebSocket without initializing Playwright.
 
@@ -263,32 +277,63 @@ def _raw_cdp_screenshot(
     elif low.endswith(".webp"):
         fmt = "webp"
 
-    cmd = {
-        "id": 1,
-        "method": "Page.captureScreenshot",
-        "params": {"format": fmt},
-    }
-
     try:
         from websockets.sync.client import connect
 
         with connect(ws_url, open_timeout=2.0, close_timeout=2.0) as ws:
-            ws.send(json.dumps(cmd))
+            req_id = 1
+            if width and height:
+                ws.send(json.dumps({
+                    "id": req_id,
+                    "method": "Emulation.setDeviceMetricsOverride",
+                    "params": {
+                        "width": int(width),
+                        "height": int(height),
+                        "deviceScaleFactor": 1,
+                        "mobile": int(width) <= 768,
+                    },
+                }))
+                req_id += 1
+                time.sleep(0.05)
+
+            screenshot_id = req_id
+            ws.send(json.dumps({
+                "id": screenshot_id,
+                "method": "Page.captureScreenshot",
+                "params": {"format": fmt},
+            }))
+            req_id += 1
+
             deadline = time.monotonic() + 5.0
+            captured = False
+            img_bytes = None
             while time.monotonic() < deadline:
                 resp_raw = ws.recv(timeout=2.0)
                 msg = json.loads(resp_raw)
-                if msg.get("id") == 1:
+                if msg.get("id") == screenshot_id:
                     if "error" in msg:
-                        return False
+                        break
                     data_b64 = msg.get("result", {}).get("data")
-                    if not data_b64:
-                        return False
-                    img_bytes = base64.b64decode(data_b64)
-                    out = Path(output_path)
-                    out.parent.mkdir(parents=True, exist_ok=True)
-                    out.write_bytes(img_bytes)
-                    return True
+                    if data_b64:
+                        img_bytes = base64.b64decode(data_b64)
+                        captured = True
+                    break
+
+            if width and height:
+                try:
+                    ws.send(json.dumps({
+                        "id": req_id,
+                        "method": "Emulation.clearDeviceMetricsOverride",
+                        "params": {},
+                    }))
+                except Exception:
+                    pass
+
+            if captured and img_bytes:
+                out = Path(output_path)
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(img_bytes)
+                return True
     except Exception:
         return False
 
@@ -299,7 +344,14 @@ def cmd_screenshot(args):
     router, lease, cdp_url, context_id = _resolve_lease(args)
     # Fast path: raw CDP WebSocket capture (bypasses Playwright, ~30ms, no theme strobing)
     try:
-        if _raw_cdp_screenshot(cdp_url, args.output, match=getattr(args, "match", None), context_id=context_id):
+        if _raw_cdp_screenshot(
+            cdp_url,
+            args.output,
+            match=getattr(args, "match", None),
+            context_id=context_id,
+            width=getattr(args, "width", None),
+            height=getattr(args, "height", None),
+        ):
             print(f"Screenshot saved to: {args.output}")
             return
     except Exception:
@@ -308,6 +360,8 @@ def cmd_screenshot(args):
     # Fallback to Playwright
     playwright, browser, _context, page = _legacy_page(args)
     try:
+        if getattr(args, "width", None) and getattr(args, "height", None):
+            page.set_viewport_size({"width": args.width, "height": args.height})
         page.screenshot(path=args.output)
         print(f"Screenshot saved to: {args.output}")
     finally:
@@ -318,13 +372,34 @@ def cmd_screenshot(args):
 def cmd_upload(args):
     playwright, browser, _context, page = _legacy_page(args)
     try:
-        selector = getattr(args, "selector", None) or "#upload-files"
-        print(f"Uploading {len(args.files)} file(s) via selector '{selector}'...")
-        page.set_input_files(selector, args.files)
-        print("Upload command executed successfully.")
+        target = page
+        frame_token = getattr(args, "frame", None)
+        if frame_token:
+            token_str = frame_token.removeprefix("f")
+            if token_str.isdigit() and int(token_str) < len(page.frames):
+                target = page.frames[int(token_str)]
+            else:
+                for f in page.frames:
+                    if frame_token in f.url or frame_token in f.name:
+                        target = f
+                        break
+        trigger = getattr(args, "trigger_click", None)
+        if trigger:
+            print(f"Waiting for file chooser triggered by '{trigger}'...")
+            with target.expect_file_chooser() as fc_info:
+                target.click(trigger)
+            file_chooser = fc_info.value
+            file_chooser.set_files(args.files)
+            print(f"Uploaded {len(args.files)} file(s) via file chooser.")
+        else:
+            selector = getattr(args, "selector", None) or "#upload-files"
+            print(f"Uploading {len(args.files)} file(s) via selector '{selector}'...")
+            target.set_input_files(selector, args.files)
+            print("Upload command executed successfully.")
     finally:
         browser.close()
         playwright.stop()
+
 
 
 def _manager_page(args):
@@ -1115,11 +1190,18 @@ def _parser():
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("list-tabs", help="List all open browser tabs")
     p = sub.add_parser("goto", help="Navigate tab to a specific URL"); p.add_argument("url")
-    p = sub.add_parser("eval", help="Evaluate JavaScript expression on active page"); p.add_argument("expression")
-    p = sub.add_parser("screenshot", help="Capture a screenshot"); p.add_argument("--output", default="screenshot.png")
+    p = sub.add_parser("eval", help="Evaluate JavaScript expression on active page")
+    p.add_argument("expression")
+    p.add_argument("--frame", default=None, help="Target frame token or index")
+    p = sub.add_parser("screenshot", help="Capture a screenshot")
+    p.add_argument("--output", default="screenshot.png")
+    p.add_argument("--width", type=int, default=None, help="Emulated viewport width")
+    p.add_argument("--height", type=int, default=None, help="Emulated viewport height")
     p = sub.add_parser("upload", help="Upload files to input[type=file]")
     p.add_argument("files", nargs="+", help="File paths to upload")
     p.add_argument("--selector", default="#upload-files", help="Selector for file input (default: #upload-files)")
+    p.add_argument("--trigger-click", default=None, help="Selector of element to click that triggers file chooser")
+    p.add_argument("--frame", default=None, help="Target frame token or index")
 
     p = sub.add_parser("observe", help="Return a compact semantic DOM projection")
     p.add_argument("--scope", default="main", choices=["main", "viewport"])

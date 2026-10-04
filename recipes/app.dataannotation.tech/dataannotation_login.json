@@ -1,0 +1,13 @@
+{
+  "id": "dataannotation_login",
+  "name": "DataAnnotation Account Login",
+  "description": "Log into DataAnnotation using email and password.",
+  "domain_pattern": ["https://app.dataannotation.tech/users/sign_in*"],
+  "steps": [
+    {"action": "fill", "target": "input[type='email'], #user_email", "value": "{{email}}"},
+    {"action": "fill", "target": "input[type='password'], #user_password", "value": "{{password}}"},
+    {"action": "click", "target": "button:has-text('Login'), input[type='submit']"}
+  ],
+  "validation": {"text_present": "Projects"},
+  "metadata": {"version": "1.0", "success_count": 1, "failure_count": 0, "last_failure_reason": null, "failure_ledger": []}
+}
