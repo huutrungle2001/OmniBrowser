@@ -3,60 +3,56 @@
 RECORD_TYPE: TASK
 RECORD_ID: task-001_mcp_server_foundation
 STATUS: TASK_READY
-ATTEMPT: 3
+ATTEMPT: 4
 CREATED_AT: 2026-10-05T22:40:00Z
-UPDATED_AT: 2026-10-05T23:25:00Z
+UPDATED_AT: 2026-10-06T00:57:00Z
 FROM: orchestrator
 TO: implementer
 
 ## Objective
 
-Transform OmniBrowser into a standard high-performance Model Context Protocol (MCP) server. Expose OmniBrowser's core capabilities (DOM observation, semantic action dispatch, execution recipes, tab isolation, and targeted visual inspection) over standard JSON-RPC 2.0 stdio transport.
+Transform OmniBrowser into a standard high-performance Model Context Protocol (MCP) server over standard JSON-RPC 2.0 stdio transport.
 
-In Attempt 3, address the 4 specific adversarial review findings from Attempt 2 (`review-task-001_mcp_server_foundation.md`):
-1. Backward compatibility: Restore historical `runBrowserCode` timeout defaults in `browser_run_code` (`timeout_ms: int | None = None`).
-2. Contract parity: Populate `document_epoch`, `revision`, `state_delta`, and measured `elapsed_ms` for hover and window scroll in `_op_act`.
-3. Invariant 8 & 10 (Lease Isolation): Fail closed in `PageManager.connect()` when `browser_context_id` is not found, rather than falling back to `contexts[0]`.
-4. Invariant 3 (Wire-Level Budget): Set `structured_output=False` on `@server.tool` for `browser_observe` so the MCP SDK does not duplicate payload over JSON-RPC wire.
+In Attempt 4 (Authorized by Human Operator following Rule 5 Escalation), resolve the 4 specific architectural blockers identified in `review-task-001_mcp_server_foundation.md`:
+1. `browser_act` Hover/Scroll Contract Parity & Revision Resolution: Eliminate the `state.revision` AttributeError in `_op_act` by resolving genuine page revision via `window[Symbol.for('__OMNI_DOM_AGENT__')]?.revision || 1` or `manager.observe()`, and populate `state_delta: {"revision": rev, "document_epoch": doc_epoch}` and `action_duration_ms: elapsed_ms` to achieve 100% `ActResult` contract parity.
+2. Lease Context Lookup & Isolation: Support context matching via `_browser_context_id` on `BrowserContext` in `PageManager.connect()` with fail-closed semantics, and author positive multi-context isolation tests.
+3. Total Wire-Level JSON-RPC Transport Budget: Enforce `MAX_OBSERVE_BUDGET_BYTES = 13500` (13.5 KB) in `src/browser_core/mcp_server.py` to ensure the complete JSON-RPC 2.0 wire response never exceeds 15 KB (15,360 bytes) including protocol framing and string escaping.
+4. MCP Protocol Compliance: Standardize clean imports from `mcp.server.mcpserver` (`mcp>=2.0.0`), removing legacy v1 fallbacks that fail current 2026-07-28 protocol compliance.
 
 ## Scope
 
 ### Leased Files & Paths:
 1. `src/browser_core/mcp_server.py`:
-   - `browser_run_code`: Change `timeout_ms: int = 5000` to `timeout_ms: int | None = None` in both the tool definition and `_op_run_code`. Forward `None` directly into `runBrowserCode(..., timeout_ms=timeout_ms)` so internal defaults (2,000 ms for read, 10,000 ms for write) are preserved.
-   - `browser_act`: In `_op_act`, populate `document_epoch`, `revision`, `state_delta`, and measured `elapsed_ms` across all action branches:
-     - For `hover`: Measure execution time, extract current page revision/document epoch from `manager`, and return complete `ActResult` dictionary.
-     - For `scroll` with ref: Measure execution time, extract page revision/document epoch, and return complete `ActResult` dictionary.
-     - For `scroll` window wheel (no ref): Measure execution time, extract page revision/document epoch, and return complete dictionary with `document_epoch`, `revision`, `state_delta: {}`, and `elapsed_ms`.
-   - Wire-Level Budget (`structured_output`): Set `structured_output=False` on the `@server.tool` decorator for `browser_observe` (and optionally all browser tools) so `CallToolResult` emits only `content` (text) and keeps `structured_content=None`, avoiding wire payload doubling.
-   - Standardize clean imports from `mcp.server.mcpserver` (`mcp>=2.0.0`).
+   - Fix `_op_act` hover and scroll branches:
+     - Query in-browser revision via `page.evaluate("() => window[Symbol.for('__OMNI_DOM_AGENT__')]?.revision || 1")` to avoid AttributeError on `_FrameState`.
+     - In the returned dictionary, populate `state_delta: {"revision": rev, "document_epoch": doc_epoch}`, `document_epoch: doc_epoch`, `revision: rev`, `elapsed_ms: elapsed_ms`, and `action_duration_ms: elapsed_ms`.
+   - Update wire budget:
+     - Change `MAX_OBSERVE_BUDGET_BYTES = 13500` (13.5 KB) in `mcp_server.py` to ensure the final serialized JSON-RPC 2.0 envelope strictly satisfies $\le 15$ KB (15,360 bytes).
+   - Standardize on `from mcp.server.mcpserver import MCPServer` (`mcp>=2.0.0`) and clean exception handling.
 
 2. `src/browser_core/page_manager.py`:
-   - Fail closed on missing lease context: In `PageManager.connect()`, if `self.browser_context_id is not None`, locate the matching context in `self.browser.contexts`. If no match is found, raise `RuntimeError(f"Leased browser context '{self.browser_context_id}' not found in active contexts")` rather than falling back to `self.browser.contexts[0]`.
+   - In `PageManager.connect()`, maintain fail-closed lease context matching via `getattr(ctx, "_browser_context_id", None) == self.browser_context_id`.
 
 3. `tests/test_mcp_server.py`:
    - Extend test suite with:
-     - Regression test verifying `PageManager.connect()` raises `RuntimeError` when given a non-existent `browser_context_id`.
-     - Test verifying `browser_run_code` default `timeout_ms=None` propagates correctly to `runBrowserCode`.
-     - Test verifying `browser_act` hover and window scroll return `document_epoch`, `revision`, `state_delta`, and `elapsed_ms`.
-     - Test verifying `browser_observe` tool returns `structured_content=None` on `CallToolResult` and total payload $\le 15$ KB.
+     - Test verifying `browser_act` hover and scroll return genuine `revision`, `document_epoch`, and populated `state_delta: {"revision": ..., "document_epoch": ...}`.
+     - Positive multi-context isolation test: Create two Playwright browser contexts, tag one with `_browser_context_id`, and verify `PageManager` selects the exact tagged context.
+     - Total wire payload test: Verify serialized `CallToolResult` JSON string $\le 15$ KB (15,360 bytes).
 
 ## Acceptance Criteria
 
-1. **Fail-Closed Lease Isolation (Invariants 8 & 10)**:
-   - `PageManager.connect()` fails closed with `RuntimeError` when an explicit `browser_context_id` cannot be found.
-2. **Backward-Compatible Timeout**:
-   - `browser_run_code(timeout_ms=None)` preserves `runBrowserCode` historical defaults (2,000 ms read / 10,000 ms write).
-3. **Contract Parity on Hover and Window Scroll**:
-   - `browser_act` returns `document_epoch`, `revision`, `state_delta`, and measured `elapsed_ms` across all action types.
-4. **Wire-Level $\le 15\text{ KB}$ Budget (Invariant 3)**:
-   - `browser_observe` specifies `structured_output=False` on tool registration; wire JSON payload strictly satisfies $\le 15$ KB limit.
-5. **Full Regression Passing**:
+1. **Contract Parity on `browser_act`**:
+   - Hover and scroll actions return `document_epoch`, `revision`, `state_delta: {"revision": rev, "document_epoch": doc_epoch}`, `elapsed_ms`, and `action_duration_ms` with zero swallowed AttributeErrors.
+2. **Lease Context Isolation (Invariants 8 & 10)**:
+   - `PageManager.connect()` successfully selects matching context when tagged with `_browser_context_id` and fails closed with `RuntimeError` when missing. Positive multi-context test passes.
+3. **Wire-Level $\le 15\text{ KB}$ Budget (Invariant 3)**:
+   - Total serialized JSON-RPC tool result wire payload strictly $\le 15$ KB (15,360 bytes) across all inputs.
+4. **Full Regression Passing**:
    - `pytest tests/test_mcp_server.py -v` passes 100%.
-   - Full regression suite `pytest tests/ -v` passes 100% with exit code 0.
-6. **Result Record & Notification**:
-   - Author updated `.agents/communication/results/task-001_mcp_server_foundation.md` for Attempt 3.
-   - Notify `omni_reviewer` via `scripts/send_prompt.sh -s omni_reviewer`.
+   - `pytest tests/ -v` passes 100% across the entire repository (145+ tests, 0 failures).
+5. **Result Record & Notification**:
+   - Update `.agents/communication/results/task-001_mcp_server_foundation.md` for Attempt 4.
+   - Lint communication records and notify `omni_reviewer`.
 
 ## Validation
 
