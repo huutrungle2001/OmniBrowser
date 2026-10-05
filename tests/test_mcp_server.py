@@ -56,6 +56,8 @@ def _call_tool_sync(server, name: str, arguments: dict):
                         items.append(json.loads(item.text))
                     except Exception:
                         items.append(item.text)
+            if name == "browser_list_tabs":
+                return items
             if len(items) == 1:
                 return items[0]
             if len(items) > 1:
@@ -160,7 +162,33 @@ def test_mcp_server_core_tools_execution(ephemeral_cdp_url, fixture_server):
         assert "state_delta" in click_res
         assert "elapsed_ms" in click_res
 
-        # 5. browser_run_code (verify DOM updated and timeout_ms parameter)
+        # Contract parity on hover
+        hover_res = _call_tool_sync(
+            server,
+            "browser_act",
+            {"action": "hover", "ref": save_btn["ref"]},
+        )
+        assert hover_res["ok"] is True
+        assert hover_res["action"] == "hover"
+        assert "document_epoch" in hover_res
+        assert "revision" in hover_res
+        assert "state_delta" in hover_res
+        assert isinstance(hover_res.get("elapsed_ms"), (int, float))
+
+        # Contract parity on window scroll (no ref)
+        scroll_res = _call_tool_sync(
+            server,
+            "browser_act",
+            {"action": "scroll", "value": "100"},
+        )
+        assert scroll_res["ok"] is True
+        assert scroll_res["action"] == "scroll"
+        assert "document_epoch" in scroll_res
+        assert "revision" in scroll_res
+        assert "state_delta" in scroll_res
+        assert isinstance(scroll_res.get("elapsed_ms"), (int, float))
+
+        # 5. browser_run_code (verify explicit timeout_ms and default timeout_ms=None)
         code_res = _call_tool_sync(
             server,
             "browser_run_code",
@@ -168,6 +196,14 @@ def test_mcp_server_core_tools_execution(ephemeral_cdp_url, fixture_server):
         )
         assert code_res["ok"] is True
         assert "Ada Lovelace" in str(code_res["result"])
+
+        default_code_res = _call_tool_sync(
+            server,
+            "browser_run_code",
+            {"code": "return window.location.href;"},
+        )
+        assert default_code_res["ok"] is True
+        assert "interactive_page" in str(default_code_res["result"])
 
         # 6. browser_inspect (verify mode, ref, depth parameters)
         dom_inspect = _call_tool_sync(server, "browser_inspect", {"mode": "dom", "depth": 2})
@@ -413,6 +449,43 @@ def test_mcp_server_concurrency(ephemeral_cdp_url, fixture_server):
         assert len(results) == 10
         for idx, val in results:
             assert val == idx * 10
+
+    finally:
+        server.browser_worker.shutdown()
+
+
+def test_page_manager_connect_fail_closed_missing_context(ephemeral_cdp_url):
+    """Verifies Invariants 8 & 10: PageManager fails closed when leased browser_context_id is not found."""
+    from browser_core.page_manager import PageManager
+
+    pm = PageManager(
+        ephemeral_cdp_url,
+        test_mode=True,
+        browser_context_id="ctx-nonexistent-99999",
+    )
+    try:
+        with pytest.raises(RuntimeError, match="Leased browser context 'ctx-nonexistent-99999' not found in active contexts"):
+            pm.connect()
+    finally:
+        pm.close()
+
+
+def test_mcp_server_observe_structured_output_is_none(ephemeral_cdp_url, fixture_server):
+    """Verifies Invariant 3 wire-level budget: structured_content is None and text payload <= 15 KB."""
+    server = create_mcp_server(ephemeral_cdp_url, test_mode=True)
+    try:
+        _call_tool_sync(server, "browser_navigate", {"url": f"{fixture_server}/interactive_page.html"})
+
+        async def _check_wire_result():
+            res = await server.call_tool("browser_observe", {})
+            # Verify structured_output=False guarantees structured_content is None
+            assert getattr(res, "structured_content", None) is None
+            # Verify single text content is returned
+            assert hasattr(res, "content") and len(res.content) == 1
+            payload_text = res.content[0].text
+            assert len(payload_text.encode("utf-8")) <= MAX_OBSERVE_BUDGET_BYTES
+
+        anyio.run(_check_wire_result)
 
     finally:
         server.browser_worker.shutdown()

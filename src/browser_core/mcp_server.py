@@ -309,24 +309,75 @@ def _op_act(
             except Exception:
                 pass
 
-        if action_lower == "hover":
+        if action_lower in {"hover", "scroll"}:
+            start_time = time.monotonic()
+            doc_epoch = "d1"
+            rev = 1
             try:
-                handle.hover()
-                return {"ok": True, "action": "hover", "ref": ref, "delta": {}, "state_delta": {}, "elapsed_ms": 0}
-            except Exception as error:
-                raise ToolError(f"Hover action failed on {ref}: {error}") from error
-        elif action_lower == "scroll":
-            try:
-                handle.scroll_into_view_if_needed()
-                return {"ok": True, "action": "scroll", "ref": ref, "delta": {}, "state_delta": {}, "elapsed_ms": 0}
-            except Exception as error:
-                raise ToolError(f"Scroll action failed on {ref}: {error}") from error
+                frame = manager._frame_for_token(page, dom_ref.frame)
+                state = manager._frame_state(frame)
+                doc_epoch = f"d{state.epoch}"
+                rev = state.revision
+            except Exception:
+                pass
+
+            if action_lower == "hover":
+                try:
+                    handle.hover()
+                    elapsed_ms = round((time.monotonic() - start_time) * 1000)
+                    return {
+                        "ok": True,
+                        "action": "hover",
+                        "ref": ref,
+                        "delta": {},
+                        "state_delta": {},
+                        "document_epoch": doc_epoch,
+                        "revision": rev,
+                        "elapsed_ms": elapsed_ms,
+                    }
+                except Exception as error:
+                    raise ToolError(f"Hover action failed on {ref}: {error}") from error
+            elif action_lower == "scroll":
+                try:
+                    handle.scroll_into_view_if_needed()
+                    elapsed_ms = round((time.monotonic() - start_time) * 1000)
+                    return {
+                        "ok": True,
+                        "action": "scroll",
+                        "ref": ref,
+                        "delta": {},
+                        "state_delta": {},
+                        "document_epoch": doc_epoch,
+                        "revision": rev,
+                        "elapsed_ms": elapsed_ms,
+                    }
+                except Exception as error:
+                    raise ToolError(f"Scroll action failed on {ref}: {error}") from error
 
     if action_lower == "scroll" and not ref:
+        start_time = time.monotonic()
         try:
             delta_y = int(value) if (value and value.lstrip("-").isdigit()) else (500 if value != "up" else -500)
             page.mouse.wheel(0, delta_y)
-            return {"ok": True, "action": "scroll", "delta_y": delta_y, "delta": {}, "state_delta": {}, "elapsed_ms": 0}
+            elapsed_ms = round((time.monotonic() - start_time) * 1000)
+            doc_epoch = "d1"
+            rev = 1
+            try:
+                state = manager._frame_state(page.main_frame)
+                doc_epoch = f"d{state.epoch}"
+                rev = state.revision
+            except Exception:
+                pass
+            return {
+                "ok": True,
+                "action": "scroll",
+                "delta_y": delta_y,
+                "delta": {},
+                "state_delta": {},
+                "document_epoch": doc_epoch,
+                "revision": rev,
+                "elapsed_ms": elapsed_ms,
+            }
         except Exception as error:
             raise ToolError(f"Window scroll failed: {error}") from error
 
@@ -403,7 +454,7 @@ def _op_run_code(
     worker: BrowserWorker,
     code: str,
     mode: str = "read",
-    timeout_ms: int = 5000,
+    timeout_ms: int | None = None,
     tab_id: str | None = None,
 ) -> dict[str, Any]:
     worker.validate_lease_health()
@@ -492,17 +543,17 @@ def create_mcp_server(
     )
     server.browser_worker = worker
 
-    @server.tool(name="browser_navigate", description="Navigate active or specified tab to URL.")
+    @server.tool(name="browser_navigate", description="Navigate active or specified tab to URL.", structured_output=False)
     def browser_navigate(url: str, tab_id: str | None = None) -> dict[str, Any]:
         """Navigate active or specified tab to URL."""
         return worker.run(_op_navigate, worker, url, tab_id)
 
-    @server.tool(name="browser_observe", description="Extract compact semantic DOM tree (<= 15 KB budget) with opaque ref IDs.")
+    @server.tool(name="browser_observe", description="Extract compact semantic DOM tree (<= 15 KB budget) with opaque ref IDs.", structured_output=False)
     def browser_observe(tab_id: str | None = None, match: str | None = None) -> dict[str, Any]:
         """Extract compact semantic DOM tree (<= 15 KB budget) with opaque ref IDs."""
         return worker.run(_op_observe, worker, tab_id, match)
 
-    @server.tool(name="browser_act", description="Execute native user action (click, fill, select, press, scroll, hover).")
+    @server.tool(name="browser_act", description="Execute native user action (click, fill, select, press, scroll, hover).", structured_output=False)
     def browser_act(
         action: str,
         ref: str | None = None,
@@ -512,12 +563,12 @@ def create_mcp_server(
         """Execute native user action (click, fill, select, press, scroll, hover)."""
         return worker.run(_op_act, worker, action, ref, value, tab_id)
 
-    @server.tool(name="browser_screenshot", description="Capture full or viewport screenshot.")
+    @server.tool(name="browser_screenshot", description="Capture full or viewport screenshot.", structured_output=False)
     def browser_screenshot(path: str | None = None, tab_id: str | None = None) -> dict[str, Any]:
         """Capture full or viewport screenshot."""
         return worker.run(_op_screenshot, worker, path, tab_id)
 
-    @server.tool(name="browser_recipe_run", description="Execute parameterized procedural workflow recipe.")
+    @server.tool(name="browser_recipe_run", description="Execute parameterized procedural workflow recipe.", structured_output=False)
     def browser_recipe_run(
         recipe_id: str,
         params: dict | None = None,
@@ -526,22 +577,22 @@ def create_mcp_server(
         """Execute parameterized procedural workflow recipe."""
         return worker.run(_op_recipe_run, worker, recipe_id, params, tab_id)
 
-    @server.tool(name="browser_run_code", description="Bounded browser JS evaluation with strict output constraints.")
+    @server.tool(name="browser_run_code", description="Bounded browser JS evaluation with strict output constraints.", structured_output=False)
     def browser_run_code(
         code: str,
         mode: str = "read",
-        timeout_ms: int = 5000,
+        timeout_ms: int | None = None,
         tab_id: str | None = None,
     ) -> dict[str, Any]:
         """Bounded browser JS evaluation with strict output constraints."""
         return worker.run(_op_run_code, worker, code, mode, timeout_ms, tab_id)
 
-    @server.tool(name="browser_list_tabs", description="List all open tabs and active targets.")
+    @server.tool(name="browser_list_tabs", description="List all open tabs and active targets.", structured_output=False)
     def browser_list_tabs() -> list[dict[str, Any]]:
         """List all open tabs and active targets."""
         return worker.run(_op_list_tabs, worker)
 
-    @server.tool(name="browser_inspect", description="Inspect accessibility tree, frame hierarchy, or DOM bounds.")
+    @server.tool(name="browser_inspect", description="Inspect accessibility tree, frame hierarchy, or DOM bounds.", structured_output=False)
     def browser_inspect(
         mode: str = "dom",
         ref: str | None = None,

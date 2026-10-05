@@ -73,6 +73,10 @@ class PageManager:
                 if getattr(ctx, "_browser_context_id", None) == self.browser_context_id:
                     self.context = ctx
                     break
+            if not self.context:
+                raise RuntimeError(
+                    f"Leased browser context '{self.browser_context_id}' not found in active contexts"
+                )
         if not self.context:
             self.context = self.browser.contexts[0] if self.browser.contexts else self.browser.new_context()
         for p in self.context.pages:
