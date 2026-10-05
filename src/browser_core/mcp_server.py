@@ -24,14 +24,26 @@ except ImportError:
     try:
         from mcp.server.fastmcp import FastMCP
         MCPServer = FastMCP
+    except ImportError as exc:
+        raise ImportError(
+            "OmniBrowser MCP server requires high-level FastMCP/MCPServer support (mcp>=1.0.0)."
+        ) from exc
+
+try:
+    from mcp.server.mcpserver.exceptions import ToolError
+except ImportError:
+    try:
+        from mcp.server.fastmcp.exceptions import ToolError
     except ImportError:
-        from mcp.server import Server as MCPServer
-        FastMCP = MCPServer
+        class ToolError(Exception):
+            pass
 
 from .contracts import (
     ActionTimeoutError,
     DOMNodeRef,
     ExitCode,
+    LeaseExpiredError,
+    LeaseNotFoundError,
     OmniBrowserError,
     ObserveResult,
     ObservedNode,
@@ -76,9 +88,32 @@ class BrowserWorker:
             if parsed.port == 17082:
                 raise ValueError("SAFETY INVARIANT VIOLATION: Test mode refuses connection to port 17082")
 
+        cdp_url = self.cdp_url
+        context_id = None
+        if self.lease_id:
+            from browser_core.broker.session_router import SessionRouter
+            router = SessionRouter()
+            lease = router.lease_manager.validate_lease(self.lease_id, self.fencing_token)
+            cdp_url = lease.cdp_url
+            context_id = lease.browser_context_id
+
         if self._manager is None or not self._manager.browser or not self._manager.browser.is_connected():
-            self._manager = PageManager(self.cdp_url, test_mode=self.test_mode).connect()
+            self._manager = PageManager(
+                cdp_url,
+                test_mode=self.test_mode,
+                browser_context_id=context_id,
+            ).connect()
         return self._manager
+
+    def validate_lease_health(self) -> None:
+        """Enforces Invariant 8 (Lease Ownership Invariant) on every operation."""
+        if self.lease_id:
+            from browser_core.broker.session_router import SessionRouter
+            router = SessionRouter()
+            try:
+                router.lease_manager.validate_lease(self.lease_id, self.fencing_token)
+            except (LeaseExpiredError, LeaseNotFoundError) as err:
+                raise ToolError(f"Lease {self.lease_id} is expired or invalid: {err}") from err
 
     def shutdown(self) -> None:
         def _close():
@@ -135,9 +170,13 @@ def _get_page(manager: PageManager, tab_id: str | None = None):
 
 
 def _op_navigate(worker: BrowserWorker, url: str, tab_id: str | None = None) -> dict[str, Any]:
+    worker.validate_lease_health()
     manager = worker.get_manager()
     page = _get_page(manager, tab_id)
-    page.goto(url, wait_until="domcontentloaded")
+    try:
+        page.goto(url, wait_until="domcontentloaded")
+    except Exception as error:
+        raise ToolError(f"Navigation to {url} failed: {error}") from error
     manager.install_scanner(page)
     tab_index = manager.context.pages.index(page) if manager.context and page in manager.context.pages else 0
     return {
@@ -149,12 +188,17 @@ def _op_navigate(worker: BrowserWorker, url: str, tab_id: str | None = None) -> 
 
 
 def _op_observe(worker: BrowserWorker, tab_id: str | None = None, match: str | None = None) -> dict[str, Any]:
+    worker.validate_lease_health()
     manager = worker.get_manager()
     target_tab = tab_id or match
     page = _get_page(manager, target_tab)
     if page not in manager._sessions:
         manager.install_scanner(page)
-    obs = manager.observe(page)
+    try:
+        obs = manager.observe(page)
+    except Exception as error:
+        raise ToolError(f"DOM observation failed: {error}") from error
+
     tree_nodes = [
         {
             "ref": str(n.ref),
@@ -172,6 +216,7 @@ def _op_observe(worker: BrowserWorker, tab_id: str | None = None, match: str | N
 
     payload: dict[str, Any] = {
         "ok": True,
+        "version": getattr(obs, "version", "1"),
         "page_url": obs.page_url,
         "frame_id": obs.frame_id,
         "document_epoch": obs.document_epoch,
@@ -182,12 +227,13 @@ def _op_observe(worker: BrowserWorker, tab_id: str | None = None, match: str | N
             "included": obs.coverage.included,
             "omitted": obs.coverage.omitted,
         },
+        "suggested_recipes": getattr(obs, "suggested_recipes", []),
     }
 
-    # Strict Token & Payload Budget Constraint (<= 15 KB JSON)
+    # 1. Truncate tree nodes if payload exceeds 15 KB
     encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    while len(encoded) > MAX_OBSERVE_BUDGET_BYTES and len(tree_nodes) > 1:
-        cut = max(1, len(tree_nodes) * 4 // 5)
+    while len(encoded) > MAX_OBSERVE_BUDGET_BYTES and len(tree_nodes) > 0:
+        cut = max(0, len(tree_nodes) * 4 // 5)
         if cut >= len(tree_nodes):
             cut = len(tree_nodes) - 1
         tree_nodes = tree_nodes[:cut]
@@ -196,6 +242,33 @@ def _op_observe(worker: BrowserWorker, tab_id: str | None = None, match: str | N
         payload["coverage"]["truncated"] = True
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
+    # 2. If metadata alone exceeds 15 KB (e.g. huge data: URL or long strings), truncate metadata
+    if len(encoded) > MAX_OBSERVE_BUDGET_BYTES:
+        payload["suggested_recipes"] = []
+        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    if len(encoded) > MAX_OBSERVE_BUDGET_BYTES:
+        max_url_len = max(50, len(payload["page_url"]) - (len(encoded) - MAX_OBSERVE_BUDGET_BYTES) - 50)
+        payload["page_url"] = payload["page_url"][:max_url_len] + "...[truncated]"
+        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    # 3. Absolute Unconditional Hard Postcondition fallback
+    if len(encoded) > MAX_OBSERVE_BUDGET_BYTES:
+        payload = {
+            "ok": True,
+            "version": "1",
+            "page_url": payload["page_url"][:120] + "...[truncated]",
+            "frame_id": str(payload.get("frame_id", ""))[:32],
+            "document_epoch": str(payload.get("document_epoch", ""))[:32],
+            "revision": payload.get("revision", 0),
+            "tree": [],
+            "coverage": {"is_complete": False, "truncated": True},
+            "suggested_recipes": [],
+        }
+        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    # Hard invariant assertion: strictly guaranteed <= 15 KB
+    assert len(encoded) <= MAX_OBSERVE_BUDGET_BYTES, f"Hard budget invariant violated: {len(encoded)} > {MAX_OBSERVE_BUDGET_BYTES}"
     return payload
 
 
@@ -206,6 +279,7 @@ def _op_act(
     value: str | None = None,
     tab_id: str | None = None,
 ) -> dict[str, Any]:
+    worker.validate_lease_health()
     manager = worker.get_manager()
     page = _get_page(manager, tab_id)
     if page not in manager._sessions:
@@ -213,55 +287,80 @@ def _op_act(
     action_lower = action.lower().strip()
 
     if ref:
-        dom_ref = DOMNodeRef.parse(ref)
+        try:
+            dom_ref = DOMNodeRef.parse(ref)
+        except Exception as error:
+            raise ToolError(f"Invalid DOM ref '{ref}': {error}") from error
+
         handle = manager.resolve_element(page, dom_ref)
         if handle is None:
-            raise StaleRefError(f"Stale ref {ref}; call browser_observe to refresh refs")
+            raise ToolError(f"Stale ref {ref}; call browser_observe to refresh refs")
 
         # Occlusion detection: Avoid clicking covered elements
         if action_lower == "click":
             try:
                 is_occ = page.evaluate("el => window[Symbol.for('__OMNI_DOM_AGENT__')]?.isOccluded?.(el)", handle)
                 if is_occ:
-                    return {
-                        "ok": False,
-                        "error": f"Element {ref} is occluded by another element/modal; cannot click covered target.",
-                        "occluded": True,
-                    }
+                    raise ToolError(
+                        f"Element {ref} is occluded by another element/modal; cannot click covered target."
+                    )
+            except ToolError:
+                raise
             except Exception:
                 pass
 
         if action_lower == "hover":
-            handle.hover()
-            return {"ok": True, "action": "hover", "ref": ref}
+            try:
+                handle.hover()
+                return {"ok": True, "action": "hover", "ref": ref, "delta": {}, "state_delta": {}, "elapsed_ms": 0}
+            except Exception as error:
+                raise ToolError(f"Hover action failed on {ref}: {error}") from error
         elif action_lower == "scroll":
-            handle.scroll_into_view_if_needed()
-            return {"ok": True, "action": "scroll", "ref": ref}
+            try:
+                handle.scroll_into_view_if_needed()
+                return {"ok": True, "action": "scroll", "ref": ref, "delta": {}, "state_delta": {}, "elapsed_ms": 0}
+            except Exception as error:
+                raise ToolError(f"Scroll action failed on {ref}: {error}") from error
 
     if action_lower == "scroll" and not ref:
-        delta_y = int(value) if (value and value.lstrip("-").isdigit()) else (500 if value != "up" else -500)
-        page.mouse.wheel(0, delta_y)
-        return {"ok": True, "action": "scroll", "delta_y": delta_y}
+        try:
+            delta_y = int(value) if (value and value.lstrip("-").isdigit()) else (500 if value != "up" else -500)
+            page.mouse.wheel(0, delta_y)
+            return {"ok": True, "action": "scroll", "delta_y": delta_y, "delta": {}, "state_delta": {}, "elapsed_ms": 0}
+        except Exception as error:
+            raise ToolError(f"Window scroll failed: {error}") from error
 
     if not ref:
-        raise ValueError(f"Action {action} requires ref")
+        raise ToolError(f"Action {action} requires ref")
 
-    res = act(page, action_lower, ref, value=value, manager=manager)
+    try:
+        res = act(page, action_lower, ref, value=value, manager=manager)
+    except (OmniBrowserError, StaleRefError, ActionTimeoutError, ValueError) as error:
+        raise ToolError(f"Action {action_lower} failed: {error}") from error
+    except Exception as error:
+        raise ToolError(f"Action {action_lower} failed with unexpected error: {error}") from error
+
     return {
         "ok": res.ok,
         "action": action_lower,
         "ref": ref,
         "delta": asdict(res.delta) if hasattr(res.delta, "__dataclass_fields__") else res.delta,
+        "state_delta": res.state_delta,
         "document_epoch": res.document_epoch,
         "revision": res.revision,
+        "elapsed_ms": res.action_duration_ms,
     }
 
 
 def _op_screenshot(worker: BrowserWorker, path: str | None = None, tab_id: str | None = None) -> dict[str, Any]:
+    worker.validate_lease_health()
     manager = worker.get_manager()
     page = _get_page(manager, tab_id)
     out_path = path or str(Path(tempfile.gettempdir()) / f"omnibrowser_screenshot_{uuid4().hex[:8]}.png")
-    page.screenshot(path=out_path)
+    try:
+        page.screenshot(path=out_path)
+    except Exception as error:
+        raise ToolError(f"Screenshot capture failed: {error}") from error
     return {
         "ok": True,
         "path": str(out_path),
@@ -275,44 +374,45 @@ def _op_recipe_run(
     params: dict | None = None,
     tab_id: str | None = None,
 ) -> dict[str, Any]:
+    worker.validate_lease_health()
     manager = worker.get_manager()
     page = _get_page(manager, tab_id)
     store = RecipeStore()
     engine = RecipeEngine(store)
     try:
         res = engine.execute(recipe_id, page, params or {})
-        return {
-            "ok": res.ok,
-            "recipe_id": recipe_id,
-            "step_index": res.step_index,
-            "fallback_required": res.fallback_required,
-            "diagnostic": res.diagnostic,
-        }
     except KeyError:
-        return {
-            "ok": False,
-            "recipe_id": recipe_id,
-            "error": f"Unknown recipe: {recipe_id}",
-            "fallback_required": True,
-        }
+        raise ToolError(f"Unknown recipe: {recipe_id}")
     except Exception as error:
-        return {
-            "ok": False,
-            "recipe_id": recipe_id,
-            "error": str(error),
-            "fallback_required": True,
-        }
+        raise ToolError(f"Recipe execution {recipe_id} failed: {error}") from error
+
+    if not res.ok:
+        step_idx = res.failure.get("step_index", res.completed_steps) if res.failure else res.completed_steps
+        raise ToolError(f"Recipe {recipe_id} failed at step {step_idx}: {res.message}")
+
+    return {
+        "ok": res.ok,
+        "recipe_id": recipe_id,
+        "completed_steps": res.completed_steps,
+        "fallback_required": res.fallback_required,
+        "message": res.message,
+    }
 
 
 def _op_run_code(
     worker: BrowserWorker,
     code: str,
     mode: str = "read",
+    timeout_ms: int = 5000,
     tab_id: str | None = None,
 ) -> dict[str, Any]:
+    worker.validate_lease_health()
     manager = worker.get_manager()
     page = _get_page(manager, tab_id)
-    result = runBrowserCode(page, script=code, mode=mode)
+    try:
+        result = runBrowserCode(page, script=code, mode=mode, timeout_ms=timeout_ms)
+    except Exception as error:
+        raise ToolError(f"runBrowserCode failed: {error}") from error
     return {
         "ok": True,
         "result": result,
@@ -320,10 +420,28 @@ def _op_run_code(
 
 
 def _op_list_tabs(worker: BrowserWorker) -> list[dict[str, Any]]:
+    worker.validate_lease_health()
     manager = worker.get_manager()
     if not manager.context or not manager.browser or not manager.browser.is_connected():
         manager.connect()
+
     tabs = []
+    # If scoped to a lease, list targets registered for that lease
+    if worker.lease_id:
+        from browser_core.broker.session_router import SessionRouter
+        router = SessionRouter()
+        lease_targets = router.target_registry.get_targets_for_lease(worker.lease_id)
+        if lease_targets:
+            for i, target in enumerate(lease_targets):
+                tabs.append({
+                    "index": i,
+                    "tab_id": str(i),
+                    "url": target.url or "about:blank",
+                    "title": target.title or "about:blank",
+                    "active": (i == 0),
+                })
+            return tabs
+
     for i, p in enumerate(manager.context.pages):
         tabs.append({
             "index": i,
@@ -338,11 +456,17 @@ def _op_list_tabs(worker: BrowserWorker) -> list[dict[str, Any]]:
 def _op_inspect(
     worker: BrowserWorker,
     mode: str = "dom",
+    ref: str | None = None,
+    depth: int = 3,
     tab_id: str | None = None,
 ) -> dict[str, Any]:
+    worker.validate_lease_health()
     manager = worker.get_manager()
     page = _get_page(manager, tab_id)
-    content = inspect_primitive(manager, page, mode=mode)
+    try:
+        content = inspect_primitive(manager, page, mode=mode, ref=ref, depth=depth)
+    except Exception as error:
+        raise ToolError(f"Inspect mode {mode} failed: {error}") from error
     return {
         "ok": True,
         "mode": mode,
@@ -403,9 +527,14 @@ def create_mcp_server(
         return worker.run(_op_recipe_run, worker, recipe_id, params, tab_id)
 
     @server.tool(name="browser_run_code", description="Bounded browser JS evaluation with strict output constraints.")
-    def browser_run_code(code: str, mode: str = "read", tab_id: str | None = None) -> dict[str, Any]:
+    def browser_run_code(
+        code: str,
+        mode: str = "read",
+        timeout_ms: int = 5000,
+        tab_id: str | None = None,
+    ) -> dict[str, Any]:
         """Bounded browser JS evaluation with strict output constraints."""
-        return worker.run(_op_run_code, worker, code, mode, tab_id)
+        return worker.run(_op_run_code, worker, code, mode, timeout_ms, tab_id)
 
     @server.tool(name="browser_list_tabs", description="List all open tabs and active targets.")
     def browser_list_tabs() -> list[dict[str, Any]]:
@@ -413,9 +542,14 @@ def create_mcp_server(
         return worker.run(_op_list_tabs, worker)
 
     @server.tool(name="browser_inspect", description="Inspect accessibility tree, frame hierarchy, or DOM bounds.")
-    def browser_inspect(mode: str = "dom", tab_id: str | None = None) -> dict[str, Any]:
+    def browser_inspect(
+        mode: str = "dom",
+        ref: str | None = None,
+        depth: int = 3,
+        tab_id: str | None = None,
+    ) -> dict[str, Any]:
         """Inspect accessibility tree, frame hierarchy, or DOM bounds."""
-        return worker.run(_op_inspect, worker, mode, tab_id)
+        return worker.run(_op_inspect, worker, mode, ref, depth, tab_id)
 
     return server
 

@@ -26,9 +26,12 @@ import pytest
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
+from browser_core.broker.session_router import SessionRouter
+from browser_core.contracts import ExecutionClass
 from browser_core.mcp_server import (
     DEFAULT_CDP_URL,
     MAX_OBSERVE_BUDGET_BYTES,
+    ToolError,
     create_mcp_server,
 )
 
@@ -127,6 +130,8 @@ def test_mcp_server_core_tools_execution(ephemeral_cdp_url, fixture_server):
         obs_res = _call_tool_sync(server, "browser_observe", {})
         assert obs_res["ok"] is True
         assert "tree" in obs_res
+        assert "version" in obs_res
+        assert "suggested_recipes" in obs_res
         encoded = json.dumps(obs_res, ensure_ascii=False).encode("utf-8")
         assert len(encoded) <= MAX_OBSERVE_BUDGET_BYTES, f"Payload {len(encoded)} exceeds 15 KB limit"
 
@@ -136,13 +141,15 @@ def test_mcp_server_core_tools_execution(ephemeral_cdp_url, fixture_server):
         save_btn = next((n for n in obs_res["tree"] if n["role"] == "button" and "Save" in n["name"]), None)
         assert save_btn is not None
 
-        # 4. browser_act (fill and click)
+        # 4. browser_act (fill and click) with contract parity (state_delta, elapsed_ms)
         fill_res = _call_tool_sync(
             server,
             "browser_act",
             {"action": "fill", "ref": name_input["ref"], "value": "Ada Lovelace"},
         )
         assert fill_res["ok"] is True
+        assert "state_delta" in fill_res
+        assert "elapsed_ms" in fill_res
 
         click_res = _call_tool_sync(
             server,
@@ -150,18 +157,20 @@ def test_mcp_server_core_tools_execution(ephemeral_cdp_url, fixture_server):
             {"action": "click", "ref": save_btn["ref"]},
         )
         assert click_res["ok"] is True
+        assert "state_delta" in click_res
+        assert "elapsed_ms" in click_res
 
-        # 5. browser_run_code (verify DOM updated)
+        # 5. browser_run_code (verify DOM updated and timeout_ms parameter)
         code_res = _call_tool_sync(
             server,
             "browser_run_code",
-            {"code": "return document.getElementById('status').innerText;", "mode": "read"},
+            {"code": "return document.getElementById('status').innerText;", "mode": "read", "timeout_ms": 3000},
         )
         assert code_res["ok"] is True
         assert "Ada Lovelace" in str(code_res["result"])
 
-        # 6. browser_inspect
-        dom_inspect = _call_tool_sync(server, "browser_inspect", {"mode": "dom"})
+        # 6. browser_inspect (verify mode, ref, depth parameters)
+        dom_inspect = _call_tool_sync(server, "browser_inspect", {"mode": "dom", "depth": 2})
         assert dom_inspect["ok"] is True
         assert "<body" in dom_inspect["content"].lower()
 
@@ -181,22 +190,20 @@ def test_mcp_server_core_tools_execution(ephemeral_cdp_url, fixture_server):
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
-        # 8. browser_recipe_run
-        recipe_res = _call_tool_sync(
-            server,
-            "browser_recipe_run",
-            {"recipe_id": "standard_enrolment_form", "params": {"name": "Grace Hopper", "course": "CS101"}},
-        )
-        assert "recipe_id" in recipe_res
-        assert "fallback_required" in recipe_res
+        # 8. browser_recipe_run (ToolError raised on failure or unknown recipe)
+        with pytest.raises(ToolError, match="Recipe standard_enrolment_form failed"):
+            _call_tool_sync(
+                server,
+                "browser_recipe_run",
+                {"recipe_id": "standard_enrolment_form", "params": {"name": "Grace Hopper", "course": "CS101"}},
+            )
 
-        unknown_recipe = _call_tool_sync(
-            server,
-            "browser_recipe_run",
-            {"recipe_id": "nonexistent_recipe"},
-        )
-        assert unknown_recipe["ok"] is False
-        assert "Unknown recipe" in unknown_recipe.get("error", "")
+        with pytest.raises(ToolError, match="Unknown recipe"):
+            _call_tool_sync(
+                server,
+                "browser_recipe_run",
+                {"recipe_id": "nonexistent_recipe"},
+            )
 
     finally:
         server.browser_worker.shutdown()
@@ -246,14 +253,13 @@ def test_mcp_server_occlusion_detection(ephemeral_cdp_url, fixture_server):
         assert covered_btn.get("occluded") is True
         assert covered_btn.get("interactive") is False
 
-        # Attempt to click occluded element via browser_act
-        click_res = _call_tool_sync(
-            server,
-            "browser_act",
-            {"action": "click", "ref": covered_btn["ref"]},
-        )
-        assert click_res["ok"] is False
-        assert click_res.get("occluded") is True or "occluded" in click_res.get("error", "").lower()
+        # Attempt to click occluded element via browser_act (must raise ToolError)
+        with pytest.raises(ToolError, match="occluded"):
+            _call_tool_sync(
+                server,
+                "browser_act",
+                {"action": "click", "ref": covered_btn["ref"]},
+            )
 
     finally:
         server.browser_worker.shutdown()
@@ -292,4 +298,121 @@ def test_mcp_server_stdio_subprocess(ephemeral_cdp_url, fixture_server):
                         data = json.loads(content.text)
                         assert data.get("ok") is True
 
+                # Call invalid act to verify stdio is_error=True semantics
+                err_res = await session.call_tool(
+                    "browser_act",
+                    {"action": "click"},
+                )
+                assert getattr(err_res, "is_error", False) is True
+
     anyio.run(_run_client)
+
+
+def test_mcp_server_observe_hard_15kb_boundary(ephemeral_cdp_url):
+    """Verifies Invariant 3: browser_observe output is strictly <= 15KB even on oversized URLs/DOM."""
+    server = create_mcp_server(ephemeral_cdp_url, test_mode=True)
+    try:
+        # Case A: Massive DOM with hundreds of interactive nodes
+        large_body = "".join(f"<button id='b{i}'>Button {i:04d} with long descriptive text</button>" for i in range(400))
+        nav_res = _call_tool_sync(
+            server,
+            "browser_navigate",
+            {"url": f"data:text/html,<html><body>{large_body}</body></html>"},
+        )
+        assert nav_res["ok"] is True
+
+        obs_a = _call_tool_sync(server, "browser_observe", {})
+        encoded_a = json.dumps(obs_a, ensure_ascii=False).encode("utf-8")
+        assert len(encoded_a) <= MAX_OBSERVE_BUDGET_BYTES, f"DOM truncation failed: {len(encoded_a)} bytes"
+        assert obs_a["coverage"]["truncated"] is True or obs_a["coverage"]["is_complete"] is False
+
+        # Case B: Massive URL (> 25KB data URI) where metadata alone exceeds 15KB
+        huge_padding = "A" * 25000
+        nav_b = _call_tool_sync(
+            server,
+            "browser_navigate",
+            {"url": f"data:text/html,<html><body><h1>Padded</h1><!--{huge_padding}--></body></html>"},
+        )
+        assert nav_b["ok"] is True
+
+        obs_b = _call_tool_sync(server, "browser_observe", {})
+        encoded_b = json.dumps(obs_b, ensure_ascii=False).encode("utf-8")
+        # Hard postcondition assertion
+        assert len(encoded_b) <= MAX_OBSERVE_BUDGET_BYTES, f"URL truncation failed: {len(encoded_b)} bytes"
+        assert "[truncated]" in obs_b["page_url"]
+
+    finally:
+        server.browser_worker.shutdown()
+
+
+def test_mcp_server_lease_isolation(ephemeral_cdp_url):
+    """Verifies Invariant 8: MCP server honors lease scoping and rejects expired/revoked leases."""
+    router = SessionRouter()
+    lease = router.lease_manager.create_lease(
+        agent_id="test-agent-mcp",
+        project_id="test-proj-mcp",
+        execution_class=ExecutionClass.CLASS_S,
+        cdp_url=ephemeral_cdp_url,
+        timeout_seconds=60,
+    )
+    router._save_state()
+
+    server = create_mcp_server(
+        ephemeral_cdp_url,
+        test_mode=True,
+        lease_id=lease.lease_id,
+        fencing_token=lease.fencing_token,
+    )
+    try:
+        # Validate worker bound to lease
+        assert server.browser_worker.lease_id == lease.lease_id
+        assert server.browser_worker.fencing_token == lease.fencing_token
+
+        # Operational while lease is active
+        tabs = _call_tool_sync(server, "browser_list_tabs", {})
+        assert isinstance(tabs, list)
+
+        # Revoke lease to simulate expiration / release
+        router.lease_manager.revoke_lease(lease.lease_id)
+        router._save_state()
+
+        # Subsequent tool execution must fail with ToolError enforcing Invariant 8
+        with pytest.raises(ToolError, match="expired or invalid"):
+            _call_tool_sync(
+                server,
+                "browser_navigate",
+                {"url": "about:blank"},
+            )
+
+    finally:
+        server.browser_worker.shutdown()
+
+
+def test_mcp_server_concurrency(ephemeral_cdp_url, fixture_server):
+    """Verifies concurrent/overlapping async tool calls execute safely without greenlet thread conflicts."""
+    server = create_mcp_server(ephemeral_cdp_url, test_mode=True)
+    try:
+        _call_tool_sync(server, "browser_navigate", {"url": f"{fixture_server}/interactive_page.html"})
+
+        results = []
+
+        async def _call_concurrently():
+            async def _worker(idx: int):
+                res = await server.call_tool("browser_run_code", {"code": f"return {idx} * 10;"})
+                # parse result
+                text = res.content[0].text
+                data = json.loads(text)
+                results.append((idx, data["result"]))
+
+            async with anyio.create_task_group() as tg:
+                for i in range(10):
+                    tg.start_soon(_worker, i)
+
+        anyio.run(_call_concurrently)
+
+        assert len(results) == 10
+        for idx, val in results:
+            assert val == idx * 10
+
+    finally:
+        server.browser_worker.shutdown()

@@ -103,6 +103,11 @@ class PageManager:
     def install_scanner(self, page: Page) -> None:
         """Register before navigation and bootstrap the current document if present."""
         _reset_color_scheme(page)
+        if page in self._sessions:
+            for frame in page.frames:
+                self._frame_state(frame)
+                self._bootstrap(frame)
+            return
         session = page.context.new_cdp_session(page)
         session.send("Page.enable")
         try:
