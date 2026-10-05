@@ -2,14 +2,14 @@
   "project_id": "OmniBrowser",
   "project_name": "Omnibrowser",
   "repo_path": "/Users/huutrungle2001/Documents/OnGoing/OmniBrowser",
-  "last_updated": "2026-10-04T12:57:46.517805+00:00",
+  "last_updated": "2026-10-05T21:37:59.136223+00:00",
   "git_info": {
     "branch": "master",
-    "commit_sha": "9033417721793e6e259a04a3edaf5aac7eb1423c",
-    "commit_message": "feat(recipes): add procedural Power BI Playground dashboard authoring recipes",
-    "commit_date": "2026-09-30T00:54:37+01:00",
+    "commit_sha": "2e3852634f176c309965145906dc88598b9052e1",
+    "commit_message": "feat: update CDP controller, add recipes, and establish local checkpoint",
+    "commit_date": "2026-10-04T14:06:16+01:00",
     "is_dirty": true,
-    "uncommitted_changes_count": 15,
+    "uncommitted_changes_count": 1,
     "remote_url": "https://github.com/huutrungle2001/OmniBrowser.git"
   },
   "current_checkpoint": {
@@ -23,6 +23,39 @@
     "blockers": []
   },
   "conversations": [
+    {
+      "id": "257acfa1-9543-4c4d-8e6b-101526e55bbe",
+      "cli": "agym",
+      "title": "OmniBrowser System Implementation Onboarding",
+      "model": "gemini-2.5-pro",
+      "created_at": "2026-10-05T21:37:37.384812+00:00",
+      "last_active": "2026-10-05T21:37:58.758863+00:00",
+      "status": "idle",
+      "transcript_url": "file:///Users/huutrungle2001/.gemini/antigravity-cli/brain/257acfa1-9543-4c4d-8e6b-101526e55bbe/.system_generated/logs/transcript.jsonl",
+      "summary": "OmniBrowser System Implementation Onboarding"
+    },
+    {
+      "id": "0d6afa10-3fde-4fa7-b9f3-aed0a730f0e3",
+      "cli": "agym",
+      "title": "Omni Reviewer Role Onboarding",
+      "model": "gemini-2.5-pro",
+      "created_at": "2026-10-05T21:37:41.686113+00:00",
+      "last_active": "2026-10-05T21:37:41.686113+00:00",
+      "status": "active",
+      "transcript_url": "file:///Users/huutrungle2001/.gemini/antigravity-cli/brain/0d6afa10-3fde-4fa7-b9f3-aed0a730f0e3/.system_generated/logs/transcript.jsonl",
+      "summary": "Omni Reviewer Role Onboarding"
+    },
+    {
+      "id": "c399fb44-9d47-42df-bbb0-d6c6bfba855d",
+      "cli": "agym",
+      "title": "Role Onboarding Directive Setup",
+      "model": "gemini-2.5-pro",
+      "created_at": "2026-10-05T21:35:57.666067+00:00",
+      "last_active": "2026-10-05T21:37:11.499274+00:00",
+      "status": "active",
+      "transcript_url": "file:///Users/huutrungle2001/.gemini/antigravity-cli/brain/c399fb44-9d47-42df-bbb0-d6c6bfba855d/.system_generated/logs/transcript.jsonl",
+      "summary": "Role Onboarding Directive Setup"
+    },
     {
       "id": "83b6950b-0bb5-460c-a46a-07bf9bc24d4a",
       "cli": "agym",
@@ -90,17 +123,6 @@
       "summary": "You are the Systems Engineer for OmniBrowser."
     },
     {
-      "id": "chatgpt-workflow_composition_review",
-      "cli": "chatgpt-web",
-      "title": "workflow_composition_review: Architectural Code Review",
-      "model": "gpt-5.6-sol-high",
-      "created_at": "2026-09-19T15:39:31Z",
-      "last_active": "2026-09-19T16:23:48Z",
-      "status": "active",
-      "transcript_url": "https://chatgpt.com/c/6aaeab64-c120-83eb-8b36-166abebb343a",
-      "summary": null
-    },
-    {
       "id": "56da8941-ca07-4bda-af86-cbe99c70353f",
       "cli": "agym",
       "title": "You are the Systems Implementation Engineer for OmniBrowser working on Task-011: Cross-Agent Promoti",
@@ -110,50 +132,6 @@
       "status": "idle",
       "transcript_url": "file:///Users/huutrungle2001/.gemini/antigravity-cli/brain/56da8941-ca07-4bda-af86-cbe99c70353f/.system_generated/logs/transcript.jsonl",
       "summary": "You are the Systems Implementation Engineer for OmniBrowser working on Task-011: Cross-Agent Promotion, Quarantine & Shared Cache Governance (Milestone v2.5.x)."
-    },
-    {
-      "id": "chatgpt-implicit_recipe_cache",
-      "cli": "chatgpt-web",
-      "title": "implicit_recipe_cache: Phản biện hệ thống cache",
-      "model": "gpt-5.6-sol-high",
-      "created_at": "2026-09-19T12:12:31Z",
-      "last_active": "2026-09-19T13:55:34Z",
-      "status": "active",
-      "transcript_url": "https://chatgpt.com/c/6aae7bc3-4654-83ed-962f-f49c3adab578",
-      "summary": null
-    },
-    {
-      "id": "chatgpt-recorder_architecture",
-      "cli": "chatgpt-web",
-      "title": "recorder_architecture: Phản biện kiến trúc Recorder",
-      "model": "gpt-5.6-sol-high",
-      "created_at": "2026-09-19T00:05:19Z",
-      "last_active": "2026-09-19T12:09:12Z",
-      "status": "active",
-      "transcript_url": "https://chatgpt.com/c/6aad8e46-55bc-83ed-a785-1546b41b434a",
-      "summary": null
-    },
-    {
-      "id": "chatgpt-browser_concurrency_v2",
-      "cli": "chatgpt-web",
-      "title": "browser_concurrency_v2: Review Milestone Gates",
-      "model": "gpt-5.6-sol-high",
-      "created_at": "2026-09-19T11:39:05Z",
-      "last_active": "2026-09-19T11:43:28Z",
-      "status": "active",
-      "transcript_url": "https://chatgpt.com/c/6aae7383-40d4-83eb-8519-ae9e78dbea90",
-      "summary": null
-    },
-    {
-      "id": "chatgpt-browser_concurrency_arch",
-      "cli": "chatgpt-web",
-      "title": "browser_concurrency_arch: Tư vấn kiến trúc Browser Pool",
-      "model": "gpt-5.6-sol-high",
-      "created_at": "2026-09-19T09:13:54Z",
-      "last_active": "2026-09-19T11:34:50Z",
-      "status": "active",
-      "transcript_url": "https://chatgpt.com/c/6aae51c9-2c98-83eb-b17b-b228c08b570a",
-      "summary": null
     },
     {
       "id": "f2a0a6f4-3a39-4bf0-9506-3ceec06d52e5",

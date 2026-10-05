@@ -1,6 +1,6 @@
 # Project Checkpoint: Omnibrowser (`OmniBrowser`)
 
-> **Status:** 🟢 ACTIVE DEVELOPMENT &nbsp;|&nbsp; **Git Tree:** ⚠️ Dirty (Uncommitted Changes) &nbsp;|&nbsp; **Branch:** `master` &nbsp;|&nbsp; **Commit:** [`90334177`](file:///Users/huutrungle2001/Documents/OnGoing/OmniBrowser/.git) &nbsp;|&nbsp; **Last Scanned:** `2026-10-04T12:57:46.517805+00:00`
+> **Status:** 🟢 ACTIVE DEVELOPMENT &nbsp;|&nbsp; **Git Tree:** ⚠️ Dirty (Uncommitted Changes) &nbsp;|&nbsp; **Branch:** `master` &nbsp;|&nbsp; **Commit:** [`2e385263`](file:///Users/huutrungle2001/Documents/OnGoing/OmniBrowser/.git) &nbsp;|&nbsp; **Last Scanned:** `2026-10-05T21:37:59.136223+00:00`
 
 **Repository Root:** [`/Users/huutrungle2001/Documents/OnGoing/OmniBrowser`](file:///Users/huutrungle2001/Documents/OnGoing/OmniBrowser)
 
@@ -12,8 +12,8 @@
 - **Active Goal & Focus:** Implement Milestone v2.6 of OmniBrowser: **Self-Healing Anchor Bundles, Determin
 - **Latest Task:** [`task-012-self-healing-and-alternate-transitions`](file:///Users/huutrungle2001/Documents/OnGoing/OmniBrowser/.agents/communication/tasks/task-012-self-healing-and-alternate-transitions.md) (`TASK_READY`)
 - **Health Check Command:** `pytest -v`
-- **Pending Diffs:** `15` modified/untracked files currently in working tree.
-- **Last Commit:** *"feat(recipes): add procedural Power BI Playground dashboard authoring recipes"* (2026-09-30T00:54:37+01:00)
+- **Pending Diffs:** `1` modified/untracked files currently in working tree.
+- **Last Commit:** *"feat: update CDP controller, add recipes, and establish local checkpoint"* (2026-10-04T14:06:16+01:00)
 
 ## 2. 🚀 Instant Onboarding Playbook
 
@@ -41,22 +41,20 @@ git status -sb
 | [`GOAL.md`](file:///Users/huutrungle2001/Documents/OnGoing/OmniBrowser/GOAL.md) | Core mission and strategic goals |
 | [`pyproject.toml`](file:///Users/huutrungle2001/Documents/OnGoing/OmniBrowser/pyproject.toml) | Python project metadata and dependencies |
 
-## 3. 💬 Conversations & CLI Threads (43 total)
+## 3. 💬 Conversations & CLI Threads (41 total)
 
 | CLI | Model | Session / Topic | Status | Last Active | Link |
 |---|---|---|---|---|---|
+| `agym` | `gemini-2.5-pro` | **OmniBrowser System Implementation Onboarding** | `idle` | 2026-10-05 21:37 | [Open Transcript](file:///Users/huutrungle2001/.gemini/antigravity-cli/brain/257acfa1-9543-4c4d-8e6b-101526e55bbe/.system_generated/logs/transcript.jsonl) |
+| `agym` | `gemini-2.5-pro` | **Omni Reviewer Role Onboarding** | `active` | 2026-10-05 21:37 | [Open Transcript](file:///Users/huutrungle2001/.gemini/antigravity-cli/brain/0d6afa10-3fde-4fa7-b9f3-aed0a730f0e3/.system_generated/logs/transcript.jsonl) |
+| `agym` | `gemini-2.5-pro` | **Role Onboarding Directive Setup** | `active` | 2026-10-05 21:37 | [Open Transcript](file:///Users/huutrungle2001/.gemini/antigravity-cli/brain/c399fb44-9d47-42df-bbb0-d6c6bfba855d/.system_generated/logs/transcript.jsonl) |
 | `agym` | `gemini-2.5-pro` | **You are the Systems Engineer for OmniBrowser.** | `idle` | 2026-09-20 12:53 | [Open Transcript](file:///Users/huutrungle2001/.gemini/antigravity-cli/brain/83b6950b-0bb5-460c-a46a-07bf9bc24d4a/.system_generated/logs/transcript.jsonl) |
 | `agym` | `gemini-2.5-pro` | **Team Member Profile Refinement** | `idle` | 2026-09-20 09:29 | [Open Transcript](file:///Users/huutrungle2001/.gemini/antigravity-cli/brain/51c5bc7b-72d5-44cc-87e3-9c713325d673/.system_generated/logs/transcript.jsonl) |
 | `agym` | `gemini-2.5-pro` | **Please update both `/Users/huutrungle2001/Documents/OnGoing/SLSCM_Lab/web/src/data/slscm_people.json** | `idle` | 2026-09-20 09:25 | `conversation://e9599197-2fac-476a-9ff8-4b3749e274ad` |
 | `agym` | `gemini-2.5-pro` | **Please update `/Users/huutrungle2001/Documents/OnGoing/SLSCM_Lab/web/src/App.tsx` according to task-** | `idle` | 2026-09-20 09:25 | `conversation://3876f8a8-2a20-4503-b71b-cdf3dddfdd8d` |
 | `agym` | `gemini-2.5-pro` | **You are the Systems Engineer for OmniBrowser.** | `idle` | 2026-09-19 17:14 | [Open Transcript](file:///Users/huutrungle2001/.gemini/antigravity-cli/brain/9c675b38-c09d-4e5a-843e-c9a9ca45f3c9/.system_generated/logs/transcript.jsonl) |
 | `agym` | `gemini-2.5-pro` | **You are the Systems Engineer for OmniBrowser.** | `idle` | 2026-09-19 16:33 | [Open Transcript](file:///Users/huutrungle2001/.gemini/antigravity-cli/brain/a264f953-16a8-48d4-9493-b5d59eba7128/.system_generated/logs/transcript.jsonl) |
-| `chatgpt-web` | `gpt-5.6-sol-high` | **workflow_composition_review: Architectural Code Review** | `active` | 2026-09-19 16:23 | [Open Transcript](https://chatgpt.com/c/6aaeab64-c120-83eb-8b36-166abebb343a) |
 | `agym` | `gemini-2.5-pro` | **You are the Systems Implementation Engineer for OmniBrowser working on Task-011: Cross-Agent Promoti** | `idle` | 2026-09-19 15:57 | [Open Transcript](file:///Users/huutrungle2001/.gemini/antigravity-cli/brain/56da8941-ca07-4bda-af86-cbe99c70353f/.system_generated/logs/transcript.jsonl) |
-| `chatgpt-web` | `gpt-5.6-sol-high` | **implicit_recipe_cache: Phản biện hệ thống cache** | `active` | 2026-09-19 13:55 | [Open Transcript](https://chatgpt.com/c/6aae7bc3-4654-83ed-962f-f49c3adab578) |
-| `chatgpt-web` | `gpt-5.6-sol-high` | **recorder_architecture: Phản biện kiến trúc Recorder** | `active` | 2026-09-19 12:09 | [Open Transcript](https://chatgpt.com/c/6aad8e46-55bc-83ed-a785-1546b41b434a) |
-| `chatgpt-web` | `gpt-5.6-sol-high` | **browser_concurrency_v2: Review Milestone Gates** | `active` | 2026-09-19 11:43 | [Open Transcript](https://chatgpt.com/c/6aae7383-40d4-83eb-8519-ae9e78dbea90) |
-| `chatgpt-web` | `gpt-5.6-sol-high` | **browser_concurrency_arch: Tư vấn kiến trúc Browser Pool** | `active` | 2026-09-19 11:34 | [Open Transcript](https://chatgpt.com/c/6aae51c9-2c98-83eb-b17b-b228c08b570a) |
 | `agym` | `gemini-2.5-pro` | **Browser Architecture Research Setup** | `idle` | 2026-09-19 09:57 | [Open Transcript](file:///Users/huutrungle2001/.gemini/antigravity-cli/brain/f2a0a6f4-3a39-4bf0-9506-3ceec06d52e5/.system_generated/logs/transcript.jsonl) |
 | `codex` | `9router` | **Codex Session 01a0ace9** | `idle` | 2026-09-18 20:04 | [Open Transcript](file:///Users/huutrungle2001/.codex/sessions/2026/09/18/rollout-2026-09-18T21-04-05-01a0b61e-78d1-7581-9a29-ce49ac848d7a.jsonl) |
 | `codex` | `9router` | **Codex Session 01a0ace9** | `idle` | 2026-09-18 19:46 | [Open Transcript](file:///Users/huutrungle2001/.codex/sessions/2026/09/18/rollout-2026-09-18T20-46-26-01a0b60e-4fb5-7532-9d6d-57075d57d971.jsonl) |
@@ -70,6 +68,8 @@ git status -sb
 | `codex` | `9router` | **Codex Session 01a0ace9** | `idle` | 2026-09-17 15:22 | [Open Transcript](file:///Users/huutrungle2001/.codex/sessions/2026/09/17/rollout-2026-09-17T16-22-35-01a0aff6-658a-7370-b163-6d6ed2adac8c.jsonl) |
 | `codex` | `9router` | **Codex Session 01a0ace9** | `idle` | 2026-09-17 15:22 | [Open Transcript](file:///Users/huutrungle2001/.codex/sessions/2026/09/17/rollout-2026-09-17T16-22-28-01a0aff6-48db-75a1-ba90-df39c5b69f9e.jsonl) |
 | `codex` | `9router` | **Codex Session 01a0ace9** | `idle` | 2026-09-17 15:22 | [Open Transcript](file:///Users/huutrungle2001/.codex/sessions/2026/09/17/rollout-2026-09-17T16-22-20-01a0aff6-29df-7111-aa73-face521cfc5c.jsonl) |
+| `codex` | `9router` | **Codex Session 01a0ace9** | `idle` | 2026-09-17 13:33 | [Open Transcript](file:///Users/huutrungle2001/.codex/sessions/2026/09/17/rollout-2026-09-17T14-33-16-01a0af92-4e90-7180-879c-c8a75104d0a1.jsonl) |
+| `codex` | `9router` | **Codex Session 01a0ace9** | `idle` | 2026-09-17 13:33 | [Open Transcript](file:///Users/huutrungle2001/.codex/sessions/2026/09/17/rollout-2026-09-17T14-33-04-01a0af92-1fdd-7142-bfa8-5a85d984a5ff.jsonl) |
 
 ## 4. 📋 Task Registry & Audit Trail (12 tasks)
 
@@ -89,4 +89,4 @@ git status -sb
 | [`task-001-core-foundation`](file:///Users/huutrungle2001/Documents/OnGoing/OmniBrowser/.agents/communication/tasks/task-001-core-foundation.md) | `TASK_READY` | `orchestrator ➔ implementer` | 2026-09-17 | Establish the foundational data contracts (`contracts.py`), the in-browser seman | [Spec](file:///Users/huutrungle2001/Documents/OnGoing/OmniBrowser/.agents/communication/tasks/task-001-core-foundation.md) \| [Result](file:///Users/huutrungle2001/Documents/OnGoing/OmniBrowser/.agents/communication/results/task-001-core-foundation.md) \| [Review](file:///Users/huutrungle2001/Documents/OnGoing/OmniBrowser/.agents/communication/reviews/task-001-core-foundation.md) |
 
 ---
-*Checkpoint automatically generated by Workbench Project Tracker on 2026-10-04T12:57:46.517805+00:00*
+*Checkpoint automatically generated by Workbench Project Tracker on 2026-10-05T21:37:59.136223+00:00*
