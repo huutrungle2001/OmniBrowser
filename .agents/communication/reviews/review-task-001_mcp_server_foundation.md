@@ -3,80 +3,77 @@
 RECORD_TYPE: REVIEW
 RECORD_ID: review-task-001_mcp_server_foundation
 STATUS: REVISION_REQUIRED
-ATTEMPT: 1
+ATTEMPT: 2
 CREATED_AT: 2026-10-05T23:05:00Z
-UPDATED_AT: 2026-10-05T23:05:00Z
+UPDATED_AT: 2026-10-05T23:24:00Z
 FROM: reviewer
 TO: orchestrator, implementer
 BASE_COMMIT: e16ea3956f7f75cb1a758b37f9991f043289a901
-REVIEWED_COMMIT: 63574b0dfd54d27b9e2521c28925c2612f7571a9
+REVIEWED_COMMIT: 514cee78e6003c1dee1fe3b8933a4d9ce7bc36ae
 
 ## Scope Audited
 
-- Reviewed Commit: `63574b0dfd54d27b9e2521c28925c2612f7571a9`
+- Reviewed Commit: `514cee78e6003c1dee1fe3b8933a4d9ce7bc36ae` (Attempt 2)
 - Base Commit: `e16ea3956f7f75cb1a758b37f9991f043289a901`
 - Inspected Files:
   - `src/browser_core/mcp_server.py`
-  - `scripts/cdp_controller.py`
-  - `scripts/dom_agent.js`
-  - `src/browser_core/contracts.py`
   - `src/browser_core/page_manager.py`
-  - `src/browser_core/primitives.py`
-  - `src/browser_core/recipes.py`
   - `tests/test_mcp_server.py`
+  - `scripts/cdp_controller.py`
+  - `src/browser_core/contracts.py`
 - Reviewer Engine: ChatGPT Web (GPT-5.6 / GPT-6 Sol Thinking High) via Chrome CDP session `omni_review` (`https://chatgpt.com/c/6ac41d2a-57b8-83eb-83b0-7cafff9379fe`)
 
 ## Findings
 
-Adversarial audit completed via ChatGPT Web Oracle. While the core threading architecture (`BrowserWorker` pinning Playwright to a single dedicated thread) is fundamentally sound, **REVISION IS REQUIRED** due to:
-1. Non-guaranteed 15KB hard budget bound on edge cases,
-2. Broken Lease isolation on the MCP path,
-3. MCP specification compliance and error semantics gaps (`isError` flag),
-4. Legacy contract discrepancies.
+Adversarial audit completed via ChatGPT Web Oracle for Attempt 2. Major improvements verified:
+- **Low-level Server alias removed**: Clean import of `MCPServer` / `FastMCP`.
+- **Tool error semantics**: Implemented `ToolError` raising `is_error=True` across tool failures.
+- **Idempotency**: `install_scanner()` properly detects existing page session.
+- **Asyncio / Playwright deadlock safety**: Fully verified (**PASS**), with 10-call concurrency regression test passing.
+- **Application-level 15KB budget**: Multitier truncation with hard postcondition assertion verified (**PASS**).
+
+However, **REVISION IS REQUIRED** to resolve four targeted edge cases before production approval:
 
 ---
 
-### 1. MCP Specification Compliance — CHANGES REQUESTED
-- **Invalid Low-Level SDK Fallback**:
-  `src/browser_core/mcp_server.py` attempts to fallback to `from mcp.server import Server as MCPServer`. Low-level `Server` is a fundamentally different API that does not provide `@server.tool(...)`. The high-level `MCPServer` / `FastMCP` decorator interface cannot run on raw `Server`. This fallback advertises compatibility it cannot fulfill; it should be removed or properly implemented.
-- **Tool Execution Failure Semantics**:
-  Failed tool executions (e.g., occluded click, recipe lookup/execution errors) return `{"ok": false, ...}` rather than raising a tool error or using MCP `isError=true` semantics. Clients relying on `CallToolResult.isError` will treat failures as successful tool calls.
-- **Modern 2026-07-28 MCP Protocol Handshake**:
-  `tests/test_mcp_server.py` exercises the legacy `session.initialize()` flow. A test should also verify the modern stateless connection path.
+### 1. `browser_run_code` Default Timeout Regression (Backward Compatibility)
+- **Issue**: Attempt 2 defined `timeout_ms: int = 5000` in `browser_run_code` and always forwards it. The established `runBrowserCode()` primitive uses `timeout_ms=None`, defaulting to 2,000 ms for `read` mode and 10,000 ms for `write` mode. Forcing 5,000 ms changes historical timeout semantics for callers that omit it.
+- **Remediation**: Set parameter default to `timeout_ms: int | None = None` and forward `None` through to preserve primitive defaults.
 
 ---
 
-### 2. Asyncio / Playwright Event Loop Deadlock Safety — PASS (Hardening Recommended)
-- **Verdict**: **PASS**.
-  The dedicated `ThreadPoolExecutor(max_workers=1)` pattern properly preserves Playwright greenlet thread affinity. MCP AnyIO worker thread dispatches to `BrowserWorker`, avoiding asyncio ↔ Playwright deadlocks.
-- **Hardening Recommendations**:
-  - Make `install_scanner()` idempotent to avoid accumulating duplicate CDP sessions and `framenavigated` callbacks across navigations.
-  - Add concurrency / overlapping tool call regression tests to verify queueing behavior under load.
+### 2. `browser_act` Contract Parity on Hover and Window Scroll
+- **Issue**: For `scroll` (window wheel) and `hover` actions, `_op_act` constructs dummy responses with `"state_delta": {}, "elapsed_ms": 0` and omits `document_epoch` and `revision`. The established `ActResult` contract requires `document_epoch`, `revision`, `state_delta`, and measured `elapsed_ms`.
+- **Remediation**: Populate `document_epoch`, `revision`, and full state fields across all action branches in `_op_act`.
 
 ---
 
-### 3. <=15KB Budget & Backward Compatibility — CHANGES REQUESTED
-- **15KB Hard Bound Violation on Long Metadata**:
-  The truncation loop in `src/browser_core/mcp_server.py` only runs while `len(tree_nodes) > 1`. If `page_url` or non-tree metadata is unusually long, or when `len(tree_nodes) <= 1`, an oversized payload will escape without truncation. An unconditional hard postcondition must enforce `serialized_size <= MAX_OBSERVE_BUDGET_BYTES` (including metadata truncation if necessary).
-- **Lease Isolation Regression**:
-  CLI forwards `--lease` and `--fencing-token` to `run_mcp_server()`, but `BrowserWorker.get_manager()` ignores both: it connects to the raw CDP URL without obtaining the leased session or scoping to `browser_context_id`. Invariant 8 ("Lease Ownership Invariant") is violated on the MCP entry point.
-- **Result Contract Parity**:
-  - `ObserveResult`: `version` and `suggested_recipes` are omitted in MCP `browser_observe`.
-  - `ActResult`: `state_delta` and `elapsed_ms` are omitted in MCP `browser_act`.
-  - Primitive arguments: `inspect` omits `ref` and `depth`; `run_code` omits `timeout_ms`.
+### 3. Lease Context Isolation Fail-Open Edge Case (Invariant 8 & 10)
+- **Issue**: In `PageManager.connect()`, if a specific `browser_context_id` is supplied but cannot be found in `browser.contexts`, it silently falls back to `browser.contexts[0]`. An unmappable or missing lease context must fail closed, not fail open into another tenant's context.
+- **Remediation**: When `self.browser_context_id is not None`, raise `TargetNotFoundError` / `LeaseNotFoundError` if that specific context ID does not exist in `browser.contexts`.
+
+---
+
+### 4. Wire-Level MCP Budget (`structured_output`)
+- **Issue**: `browser_observe` returns a typed `dict[str, Any]`. In the high-level Python SDK, a dictionary return can serialize into both textual `content` and `structured_content`, doubling the wire payload over stdio JSON-RPC.
+- **Remediation**: Specify `structured_output=False` on the `@server.tool` decorator for `browser_observe` (or ensure serialized stdio payload $\le 15$ KB).
+
+---
 
 ## Independent Verification
 
 | Check | Command Executed by Reviewer | Exit Code | Outcome |
 | :--- | :--- | :---: | :--- |
-| MCP Test Suite | `pytest tests/test_mcp_server.py -v` | 0 | 5/5 PASSED |
-| Legacy CLI Suite | `pytest tests/test_cli_legacy.py -v` | 0 | 9/9 PASSED |
-| Whitespace Hygiene | `git diff --check e16ea39..63574b0` | 0 | 0 warnings (Clean) |
-| ChatGPT Web Audit | `./scripts/oracle extract --session omni_review` | 0 | Detailed 10KB Adversarial Audit Extracted |
+| MCP Test Suite | `pytest tests/test_mcp_server.py -v` | 0 | 8/8 PASSED |
+| Full Regression Suite | `pytest tests/ -v` | 0 | 143/143 PASSED |
+| Whitespace Hygiene | `git diff --check e16ea39..514cee7` | 0 | 0 warnings (Clean) |
+| ChatGPT Web Audit | `./scripts/oracle extract --session omni_review` | 0 | Detailed Adversarial Audit Extracted |
 | Schema Linter | `python3 scripts/lint_communication_records.py .agents/communication/reviews/review-task-001_mcp_server_foundation.md` | 0 | PASSED |
 
 ## Decision Rationale
 
-Task `task-001_mcp_server_foundation` achieves solid architectural foundations with its thread-pinned browser worker and passing ephemeral tests. However, before merging into production, the security invariant for lease context isolation must be restored, the 15KB payload limit must be enforced as an absolute postcondition, and MCP tool failure semantics must adhere to standard `isError=true` reporting.
+Attempt 2 makes substantial architectural progress: thread affinity is proven safe under concurrency, tool errors adhere to standard MCP `isError=true` reporting, and application-level 15KB budget postconditions are established. 
 
-Status is set to **REVISION_REQUIRED** pending these specific remediations.
+To achieve 100% backward compatibility and airtight lease isolation, the remaining 4 edge cases (run_code timeout default, act hover/scroll contract parity, fail-closed lease context lookup, and wire-level budget) must be remediated.
+
+Status remains **REVISION_REQUIRED** for Attempt 3.
