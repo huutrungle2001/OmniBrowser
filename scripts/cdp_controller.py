@@ -1187,7 +1187,8 @@ def _parser():
     parser.add_argument("--match", default=None, help="Target tab by URL substring")
     parser.add_argument("--lease", "--session", dest="lease", default=None, help="Scope operations to an active broker lease ID")
     parser.add_argument("--fencing-token", type=int, default=None, help="Fencing token for lease validation")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("--mcp", action="store_true", default=False, help="Launch stdio Model Context Protocol (MCP) server")
+    sub = parser.add_subparsers(dest="command", required=False)
     sub.add_parser("list-tabs", help="List all open browser tabs")
     p = sub.add_parser("goto", help="Navigate tab to a specific URL"); p.add_argument("url")
     p = sub.add_parser("eval", help="Evaluate JavaScript expression on active page")
@@ -1322,6 +1323,16 @@ def _parser():
 
 def main(argv=None):
     args = _parser().parse_args(argv)
+    if getattr(args, "mcp", False):
+        from browser_core.mcp_server import run_mcp_server
+        return run_mcp_server(
+            cdp_url=args.cdp_url,
+            lease_id=args.lease,
+            fencing_token=args.fencing_token,
+        )
+    if not args.command:
+        _parser().print_help()
+        return int(ExitCode.INVALID_INPUT)
     try:
         command = {"runBrowserCode": "run-code", "inspectVisual": "visual"}.get(args.command, args.command)
         if command == "broker":

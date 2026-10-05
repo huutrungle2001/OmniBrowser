@@ -146,6 +146,7 @@ class PageManager:
                 interactive=node["interactive"],
                 disabled=node.get("disabled", False),
                 value=node.get("value"),
+                occluded=node.get("occluded", False),
             )
             for node in raw["nodes"]
         ]

@@ -117,6 +117,7 @@ class ObservedNode:
     interactive: bool
     disabled: bool = False
     value: str | None = None
+    occluded: bool = False
 
 
 @dataclass(slots=True)

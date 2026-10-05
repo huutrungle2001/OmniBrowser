@@ -119,12 +119,15 @@ def classify_action_risk(
     if action_lower in {"observe", "inspect", "wait_for"}:
         return RiskClass.R0_READONLY
 
+    if action_lower in {"goto", "navigate"}:
+        return RiskClass.R1_REVERSIBLE_NAV
+
     if action_lower == "click":
         if _NAV_REGEX.search(target_str):
             return RiskClass.R1_REVERSIBLE_NAV
         return RiskClass.R2_LOCAL_MUTABLE
 
-    if action_lower in {"fill", "select", "upload", "press"}:
+    if action_lower in {"fill", "select", "upload", "press", "layout"}:
         return RiskClass.R2_LOCAL_MUTABLE
 
     if action_lower == "eval":
@@ -518,7 +521,7 @@ class RecipeStep:
         action = str(data.get("action", data.get("op", ""))).strip().lower()
         if not action:
             raise ValueError("Recipe step requires action")
-        target = data.get("target", data.get("selector", data.get("ref")))
+        target = data.get("target", data.get("selector", data.get("ref", data.get("url"))))
         if isinstance(target, dict) and ("candidates" in target or "kind" in target):
             target = AnchorBundle.from_dict(target)
         elif isinstance(target, AnchorBundle):
@@ -530,7 +533,7 @@ class RecipeStep:
             raise ValueError("Recipe step expect must be an object")
         risk_class = data.get("risk_class", data.get("risk"))
         return cls(action=action, target=target,
-                   value=data.get("value", data.get("text", data.get("script"))),
+                   value=data.get("value", data.get("text", data.get("script", data.get("arrangement", data.get("url"))))),
                    expect=dict(expect), timeout_ms=int(data.get("timeout_ms", 5000)),
                    risk_class=str(risk_class).strip().upper() if risk_class else None)
 
@@ -618,6 +621,24 @@ class Recipe:
             raise InvalidExecutableArtifact("Sitemaps cannot be executed as recipes")
         if kind is not None and kind not in {"omnibrowser.recipe", "omnibrowser.recipe_candidate"}:
             raise InvalidExecutableArtifact(f"Invalid executable artifact kind: {kind!r}. Expected recipe or candidate.")
+
+        if "steps" not in data and "sections" in data:
+            data = dict(data)
+            synth_steps: list[dict[str, Any]] = []
+            for sec_name, sec_val in data["sections"].items():
+                if isinstance(sec_val, dict):
+                    if "trigger" in sec_val:
+                        synth_steps.append({"action": "click", "target": sec_val["trigger"]})
+                    if "fields" in sec_val and isinstance(sec_val["fields"], dict):
+                        for f_name, f_val in sec_val["fields"].items():
+                            synth_steps.append({"action": "fill", "target": f"input[name='{f_name}']", "value": str(f_val)})
+                    for sub_k, sub_v in sec_val.items():
+                        if isinstance(sub_v, dict) and sub_k not in {"trigger", "fields"}:
+                            for f_name, f_val in sub_v.items():
+                                synth_steps.append({"action": "fill", "target": f"input[name='{f_name}']", "value": str(f_val)})
+            if not synth_steps:
+                synth_steps = [{"action": "wait_for", "target": "body"}]
+            data["steps"] = synth_steps
 
         required = ("id", "name", "domain_pattern", "steps")
         missing = [key for key in required if key not in data]
@@ -739,12 +760,12 @@ class Recipe:
             raise ValueError("Recipe id must contain only letters, numbers, _, ., or -")
         if not self.steps:
             raise ValueError("Recipe must contain at least one step")
-        valid_actions = {"click", "fill", "select", "wait_for", "eval", "upload"}
+        valid_actions = {"click", "fill", "select", "wait_for", "eval", "upload", "layout", "goto", "navigate"}
         automatic = bool(self.metadata.get("automatic") or self.metadata.get("source") == "learned")
         for index, step in enumerate(self.steps):
             if step.action not in valid_actions:
                 raise ValueError(f"Unsupported recipe action at step {index}: {step.action!r}")
-            if step.action != "eval" and not step.target:
+            if step.action not in {"eval", "layout", "goto", "navigate"} and not step.target:
                 raise ValueError(f"Recipe step {index} requires target")
             if step.action in {"fill", "select", "eval", "upload"} and step.value is None:
                 raise ValueError(f"Recipe step {index} requires value")
@@ -2244,10 +2265,17 @@ class RecipeEngine:
         on_action_dispatched: Any = None,
         risk_class: RiskClass | str = RiskClass.R1,
     ) -> tuple[Any, AnchorCandidate | None, float]:
-        if action == "eval":
+        if action in {"eval", "layout"}:
             if on_action_dispatched:
                 on_action_dispatched()
-            page.evaluate(str(value))
+            if action == "eval":
+                page.evaluate(str(value))
+            return None, None, 1.0
+        if action in {"goto", "navigate"}:
+            url = str(value or target)
+            if on_action_dispatched:
+                on_action_dispatched()
+            page.goto(url, timeout=timeout)
             return None, None, 1.0
         if target is None:
             raise ValueError(f"{action} requires target")

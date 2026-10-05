@@ -66,6 +66,50 @@
     return rect.width > 0 && rect.height > 0;
   };
 
+  const isOccluded = (element, rect) => {
+    if (!rect || rect.width <= 0 || rect.height <= 0) return true;
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    if (cx < 0 || cx > window.innerWidth || cy < 0 || cy > window.innerHeight) {
+      return false;
+    }
+    const elementAtPoint = document.elementFromPoint(cx, cy);
+    if (!elementAtPoint) return false;
+
+    if (element === elementAtPoint || element.contains(elementAtPoint) || elementAtPoint.contains(element)) {
+      return false;
+    }
+
+    if (element.tagName === "INPUT" && element.id) {
+      try {
+        const escapedId = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(element.id) : element.id;
+        const assocLabel = document.querySelector(`label[for="${escapedId}"]`);
+        if (assocLabel && (assocLabel === elementAtPoint || assocLabel.contains(elementAtPoint))) {
+          return false;
+        }
+      } catch (e) {}
+    }
+    if (element.tagName === "INPUT") {
+      let ancestor = elementAtPoint;
+      for (let i = 0; i < 3 && ancestor; i++) {
+        if (ancestor.tagName === "LABEL" && ancestor.contains(element)) {
+          return false;
+        }
+        ancestor = ancestor.parentElement;
+      }
+    }
+    if (element.tagName === "LABEL") {
+      if (element.htmlFor && elementAtPoint.tagName === "INPUT" && elementAtPoint.id === element.htmlFor) {
+        return false;
+      }
+      if (elementAtPoint.tagName === "INPUT" && element.contains(elementAtPoint)) {
+        return false;
+      }
+    }
+
+    return true;
+  };
+
   const isCandidate = (element) => {
     if (!isVisible(element) || element.matches("script, style, svg, option, template")) return false;
     if (element.matches("button, a[href], input:not([type='hidden']), textarea, select")) return true;
@@ -151,18 +195,24 @@
       const nodes = candidates().slice(0, maxElements).map((element) => {
         const rect = element.getBoundingClientRect();
         const isPassword = element instanceof HTMLInputElement && element.type === "password";
+        const occluded = isOccluded(element, rect);
         return {
           ref: refFor(element),
           role: roleFor(element),
           name: labelText(element),
           bounds: [Math.round(rect.x), Math.round(rect.y), Math.round(rect.width), Math.round(rect.height)],
           visible: true,
-          interactive: true,
+          interactive: !occluded,
+          occluded: occluded,
           disabled: Boolean(element.disabled || element.getAttribute("aria-disabled") === "true"),
           value: isPassword ? undefined : ("value" in element ? String(element.value).slice(0, 256) : undefined)
         };
       });
       return { revision, nodes };
+    },
+    isOccluded(element, rect) {
+      if (!element) return true;
+      return isOccluded(element, rect || element.getBoundingClientRect());
     },
     resolve(ref) {
       const element = liveElement(ref);

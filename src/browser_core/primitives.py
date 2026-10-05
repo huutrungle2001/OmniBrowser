@@ -254,7 +254,7 @@ def inspect(
           return walk(root, 0);
         }
         """
-        raw = handle.evaluate(script, depth) if handle else frame.evaluate(script, depth)
+        raw = handle.evaluate(script, depth) if handle else frame.evaluate("([el, d]) => (" + script + ")(el || document.documentElement, d)", [None, depth])
         return _bounded(raw)
 
     if mode == "ax":
@@ -279,7 +279,7 @@ def inspect(
           return walk(root, 0);
         }
         """
-        raw = handle.evaluate(script, depth) if handle else frame.evaluate(script, depth)
+        raw = handle.evaluate(script, depth) if handle else frame.evaluate("([el, d]) => (" + script + ")(el || document.body || document.documentElement, d)", [None, depth])
         return _bounded(raw)
 
     raise ValueError(f"Unsupported inspect mode: {mode}")

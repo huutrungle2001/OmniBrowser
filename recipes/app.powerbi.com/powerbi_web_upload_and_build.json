@@ -89,6 +89,8 @@
       "step": 13,
       "name": "Format Executive Layout",
       "action": "layout",
+      "target": ".visual-container-component",
+      "value": "2x2_executive_grid",
       "arrangement": "2x2_executive_grid"
     }
   ],

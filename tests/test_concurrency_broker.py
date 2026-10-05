@@ -15,9 +15,14 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import stat
+import sys
 import tempfile
 import time
 import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from browser_core.broker import (
     AdmissionController,
