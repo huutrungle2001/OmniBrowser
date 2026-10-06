@@ -3,9 +3,9 @@
 RECORD_TYPE: TASK
 RECORD_ID: task-001_mcp_server_foundation
 STATUS: TASK_READY
-ATTEMPT: 6
+ATTEMPT: 7
 CREATED_AT: 2026-10-05T22:40:00Z
-UPDATED_AT: 2026-10-06T02:08:00Z
+UPDATED_AT: 2026-10-06T02:35:00Z
 FROM: orchestrator
 TO: implementer
 
@@ -13,69 +13,90 @@ TO: implementer
 
 Transform OmniBrowser into a standard high-performance Model Context Protocol (MCP) server over standard JSON-RPC 2.0 stdio transport.
 
-In Attempt 6 (Final Polish Pass Authorized by Human Operator), resolve the final 3 architectural and backward-compatibility issues identified in `review-task-001_mcp_server_foundation.md`:
-1. Cross-Frame State & Occlusion Parity: For ref-targeted actions in `src/browser_core/mcp_server.py`, evaluate revision and occlusion using `(frame if frame else page).evaluate(...)` so iframe elements return the target frame's authoritative revision and epoch.
-2. Authentic Chrome CDP Context Resolution: In `src/browser_core/page_manager.py`, resolve `self.browser_context_id` by inspecting active contexts and querying genuine Chrome CDP `browserContextId` via `Target.getTargetInfo` through `ctx.new_cdp_session(page)`, eliminating synthetic attribute dependence.
-3. Formal Invariant 3 Wire Modeling: In `src/browser_core/mcp_server.py`, model `_wire_size()` using standard MCP v2 JSON-RPC response envelopes with 36-char UUID request IDs (`"00000000-0000-0000-0000-000000000000"`), `resultType: "tool_result"`, and `isError: False`, guaranteeing `_wire_size(payload) <= 15360` bytes. Formally document the invariant scope.
-4. Iframe Action Test Coverage: In `tests/test_mcp_server.py`, author a test verifying ref-based hover/scroll targeting an iframe element, and update multi-context tests to use genuine CDP context resolution with zero monkey-patching.
+In Attempt 7 (Final Sign-Off Pass Authorized by Human Operator), resolve the final 2 edge cases identified in `review-task-001_mcp_server_foundation.md` (commit `6f1194b`):
+1. Empty Leased Browser Context Resolution: In `src/browser_core/page_manager.py`, resolve `self.browser_context_id` even when candidate browser contexts have zero pages (`ctx.pages == []`) by creating a temporary probe page (`p = ctx.new_page()`) to query `Target.getTargetInfo`. If the context matches, tag `ctx._browser_context_id = self.browser_context_id`, retain `p`, and bind `self.context = ctx`; if not, close `p.close()` and inspect the next context.
+2. Authentic 2026 SDK Envelope Modeling & Transport Reserve Buffer: In `src/browser_core/mcp_server.py`, update `_wire_size()` to simulate the exact modern MCP 2026-07-28 response envelope with `resultType: "complete"`, SDK runner `_meta: {"io.modelcontextprotocol/serverInfo": {"name": "omnibrowser", "version": "1.0.0"}}`, and 36-char UUID request ID. In `_is_over_budget()`, allocate a 256-byte transport headroom reserve (`_wire_size(p) > (15360 - 256)`).
+3. Empty Context Positive Regression Test: In `tests/test_mcp_server.py`, add `test_page_manager_connect_empty_context` verifying that an authentic CDP browser context containing zero pages resolves cleanly.
 
 ## Scope
 
 ### Leased Files & Paths:
-1. `src/browser_core/mcp_server.py`:
-   - In `_op_act`:
-     - When `ref` is provided, resolve `frame = manager._frame_for_token(page, dom_ref.frame)`.
-     - Target evaluation context: `target_eval = frame if frame is not None else page`.
-     - Occlusion check: execute `target_eval.evaluate("el => window[Symbol.for('__OMNI_DOM_AGENT__')]?.isOccluded?.(el)", handle)`.
-     - Hover/Scroll revision: execute `int(target_eval.evaluate("() => window[Symbol.for('__OMNI_DOM_AGENT__')]?.revision || 1"))`.
-   - In `_wire_size`:
-     - Update simulated envelope to include MCP v2 `resultType: "tool_result"` and 36-char UUID request ID (`"00000000-0000-0000-0000-000000000000"`):
+1. `src/browser_core/page_manager.py`:
+   - In `PageManager.connect()`:
+     - When `self.browser_context_id` is supplied:
+       - Iterate over `self.browser.contexts`.
+       - Check `getattr(ctx, "_browser_context_id", None) == self.browser_context_id`.
+       - If not yet matched, inspect context's CDP context ID:
+         - If `ctx.pages`: use `p = ctx.pages[0]`, created_probe = False.
+         - If `not ctx.pages`: create probe page `p = ctx.new_page()`, created_probe = True.
+         - Attach temporary CDP session `session = ctx.new_cdp_session(p)`:
+           ```python
+           try:
+               info = session.send("Target.getTargetInfo")
+               ctx_id = info.get("targetInfo", {}).get("browserContextId")
+               if ctx_id == self.browser_context_id:
+                   ctx._browser_context_id = self.browser_context_id
+                   self.context = ctx
+                   created_probe = False  # retain page for subsequent operations
+                   break
+           finally:
+               try:
+                   session.detach()
+               except Exception:
+                   pass
+               if created_probe:
+                   try:
+                       p.close()
+                   except Exception:
+                       pass
+           ```
+       - If not found across all contexts, fail closed with `RuntimeError(f"Leased browser context '{self.browser_context_id}' not found in active contexts")`.
+
+2. `src/browser_core/mcp_server.py`:
+   - In `_wire_size(p)`:
+     - Update simulated envelope to include MCP 2026-07-28 `resultType: "complete"`, SDK runner `_meta`, and 36-char UUID request ID:
        ```python
        wrapper = {
            "jsonrpc": "2.0",
            "id": "00000000-0000-0000-0000-000000000000",
            "result": {
-               "resultType": "tool_result",
+               "resultType": "complete",
+               "_meta": {
+                   "io.modelcontextprotocol/serverInfo": {
+                       "name": "omnibrowser",
+                       "version": "1.0.0",
+                   }
+               },
                "content": [{"type": "text", "text": raw_text}],
                "isError": False,
            },
        }
        ```
-     - Enforce `_wire_size(payload) <= 15360` bytes.
-     - Document that Invariant 3 bounds server-controlled `CallToolResult` payloads and standard JSON-RPC 2.0 stdio framing.
-
-2. `src/browser_core/page_manager.py`:
-   - In `PageManager.connect()`:
-     - When `self.browser_context_id` is supplied:
-       - Iterate over `self.browser.contexts`.
-       - First check if `getattr(ctx, "_browser_context_id", None) == self.browser_context_id`.
-       - If not yet matched, for contexts with active pages (`ctx.pages`), attach a temporary CDP session (`session = ctx.new_cdp_session(p)`) and query `Target.getTargetInfo` to extract `info.get("targetInfo", {}).get("browserContextId")`.
-       - If `browserContextId == self.browser_context_id`, tag `ctx._browser_context_id = self.browser_context_id`, assign `self.context = ctx`, and break.
-       - If not found across all contexts, fail closed with `RuntimeError(f"Leased browser context '{self.browser_context_id}' not found in active contexts")`.
+   - In `_is_over_budget(p)`:
+     - Apply a 256-byte transport reserve: `return len(encoded) > MAX_OBSERVE_BUDGET_BYTES or _wire_size(p) > (15360 - 256)`.
+     - Update docstring formally defining Invariant 3 as bounding the server-controlled `CallToolResult` response payload and transport-modeled outer packet.
 
 3. `tests/test_mcp_server.py`:
-   - In `test_page_manager_connect_positive_multi_context`:
-     - Remove monkey-patching (`ctx_b._browser_context_id = ...`).
-     - Obtain real CDP `browserContextId` by creating a page in `ctx_b`, attaching `session = ctx_b.new_cdp_session(page_b)`, sending `Target.getTargetInfo`, and reading `info["targetInfo"]["browserContextId"]`.
-     - Connect `pm_leased` with `browser_context_id=real_cdp_context_id`, and assert `pm_leased.context is ctx_b`.
-   - Add `test_mcp_server_act_iframe_ref_hover_scroll`:
-     - Load a page with an iframe fixture (e.g. `nested_frames.html` or similar), observe DOM to get a ref inside the iframe, perform hover/scroll, and assert `state_delta` matches the iframe's epoch and revision.
-   - Update wire budget test assertions to verify envelope with UUID request ID $\le 15,360$ bytes.
+   - Add `test_page_manager_connect_empty_context(ephemeral_cdp_url)`:
+     - Connect `pm_setup = PageManager(ephemeral_cdp_url, test_mode=True).connect()`.
+     - Create `ctx_empty = pm_setup.browser.new_context()`. Ensure `ctx_empty.pages == []`.
+     - Create a probe page on `ctx_empty` temporarily to discover its authentic CDP `browserContextId`, then close that probe page so `ctx_empty.pages == []` again.
+     - Connect `pm_leased = PageManager(ephemeral_cdp_url, test_mode=True, browser=pm_setup.browser, browser_context_id=real_empty_id).connect()`.
+     - Assert `pm_leased.context is ctx_empty`.
+   - Update wire size assertions in `test_mcp_server_observe_hard_15kb_boundary` and `test_mcp_server_core_tools_execution` to test the updated 2026 envelope with `resultType: "complete"` and `_meta`.
 
 ## Acceptance Criteria
 
-1. **Cross-Frame State & Occlusion Parity**:
-   - Ref-targeted actions inside iframes query revision and occlusion in the target frame context (`target_eval = frame if frame is not None else page`), returning consistent `document_epoch` and `revision`.
-2. **Authentic CDP Context Resolution**:
-   - `PageManager.connect()` resolves leased browser contexts via real Chrome CDP `Target.getTargetInfo` without relying on synthetic monkey-patching.
-   - Fail-closed behavior on missing or invalid context IDs remains strictly enforced.
-3. **Formal Invariant 3 Wire Modeling**:
-   - `_wire_size()` models standard MCP v2 JSON-RPC envelopes with 36-char UUID request IDs and `resultType: "tool_result"`, guaranteeing that the outer wire packet is $\le 15$ KB (15,360 bytes).
-4. **Comprehensive Regression Passing**:
-   - `pytest tests/test_mcp_server.py -v` passes 100% including new iframe ref action and authentic CDP context tests.
-   - `pytest tests/ -v` passes 100% across the entire repository (147+ tests, 0 failures).
+1. **Empty Leased Context Resolution**:
+   - `PageManager.connect()` resolves leased browser contexts via real Chrome CDP `Target.getTargetInfo` whether the context contains existing pages or is currently empty (`ctx.pages == []`).
+2. **Accurate 2026 Wire Budget Envelope & Reserve**:
+   - `_wire_size()` models standard MCP 2026-07-28 response envelopes including `resultType: "complete"`, SDK `_meta.io.modelcontextprotocol/serverInfo`, and 36-char UUID request ID.
+   - 256-byte transport reserve is enforced to ensure standard and variable-length client request IDs cannot breach the 15,360-byte wire limit.
+3. **Comprehensive Regression Passing**:
+   - `pytest tests/test_mcp_server.py -v` passes 100% including new empty context and updated envelope tests.
+   - `pytest tests/ -v` passes 100% across the entire repository (148+ tests, 0 failures).
    - Zero live profile pollution: tests never connect to port 17082.
-5. **Clean Handoff**:
+4. **Clean Handoff**:
    - Result record updated and committed.
    - `python3 scripts/lint_communication_records.py` passes with exit code 0.
 
