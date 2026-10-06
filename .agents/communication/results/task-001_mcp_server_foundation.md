@@ -3,46 +3,42 @@
 RECORD_TYPE: RESULT
 RECORD_ID: task-001_mcp_server_foundation
 STATUS: READY_FOR_REVIEW
-ATTEMPT: 6
+ATTEMPT: 7
 CREATED_AT: 2026-10-05T22:55:00Z
-UPDATED_AT: 2026-10-06T02:16:00Z
+UPDATED_AT: 2026-10-06T02:38:00Z
 FROM: implementer
 TO: reviewer, orchestrator
 BASE_COMMIT: e16ea3956f7f75cb1a758b37f9991f043289a901
-IMPLEMENTATION_TIP: a88a2e62a1ed2f90e0802e1125fcd24288977254
+IMPLEMENTATION_TIP: 0c41a63b564ddc25099ae08abcdeb3a64af9a84d
 
 ## Summary
 
-In Attempt 6 (Final Polish Pass Authorized by Human Operator), completely resolved all 3 architectural blockers and extended iframe test coverage per `review-task-001_mcp_server_foundation.md` and the Attempt 6 task specification:
+In Attempt 7 (Final Sign-Off Pass Authorized by Human Operator), completely resolved all 2 remaining edge cases and verified empty context resolution per `review-task-001_mcp_server_foundation.md` (commit `6f1194b`) and the Attempt 7 task specification:
 
-1. **Cross-Frame State & Occlusion Parity**:
-   - In `_op_act` (`src/browser_core/mcp_server.py`), resolved `target_eval = frame if frame is not None else page` for ref-targeted operations.
-   - Occlusion checks execute `target_eval.evaluate("el => window[Symbol.for('__OMNI_DOM_AGENT__')]?.isOccluded?.(el)", handle)`.
-   - Hover and scroll revision evaluations execute `int(target_eval.evaluate("() => window[Symbol.for('__OMNI_DOM_AGENT__')]?.revision ?? 0"))`, guaranteeing elements inside iframes return the target frame's authoritative revision and epoch rather than the top-level frame's metadata.
+1. **Empty Leased Browser Context Resolution**:
+   - In `PageManager.connect()` (`src/browser_core/page_manager.py`), resolved `self.browser_context_id` even when candidate browser contexts have zero pages (`ctx.pages == []`) by creating a temporary probe page (`p = ctx.new_page()`) to query `Target.getTargetInfo`.
+   - If the context matches, tags `ctx._browser_context_id = self.browser_context_id`, retains `p` for subsequent operations, and binds `self.context = ctx`.
+   - If not matched, closes `p.close()` immediately, preserving clean state across non-matching contexts.
+   - Strict fail-closed semantics remain enforced: raises `RuntimeError(f"Leased browser context '{self.browser_context_id}' not found in active contexts")` if the leased context ID is not found.
 
-2. **Authentic Chrome CDP Context Resolution**:
-   - In `PageManager.connect()` (`src/browser_core/page_manager.py`), resolved `self.browser_context_id` by inspecting active contexts and querying genuine Chrome CDP `browserContextId` via `Target.getTargetInfo` through `ctx.new_cdp_session(p)`.
-   - Tags matched context with `ctx._browser_context_id = self.browser_context_id` and binds `self.context = ctx`.
-   - Fail-closed semantics strictly preserved: if the leased context ID is not found across active contexts, raises `RuntimeError(f"Leased browser context '{self.browser_context_id}' not found in active contexts")`.
+2. **Authentic 2026 SDK Envelope Modeling & Transport Reserve Buffer**:
+   - In `src/browser_core/mcp_server.py`, updated `_wire_size()` to simulate the exact modern MCP 2026-07-28 response envelope with `resultType: "complete"`, SDK runner `_meta: {"io.modelcontextprotocol/serverInfo": {"name": "omnibrowser", "version": "1.0.0"}}`, and 36-char UUID request ID.
+   - In `_is_over_budget()`, applied a 256-byte transport headroom reserve (`len(encoded) > MAX_OBSERVE_BUDGET_BYTES or _wire_size(p) > (15360 - 256)`).
+   - Formally documented Invariant 3 as bounding the server-controlled `CallToolResult` response payload and transport-modeled outer packet.
 
-3. **Formal Invariant 3 Wire Modeling**:
-   - In `src/browser_core/mcp_server.py`, modeled `_wire_size()` using standard MCP v2 JSON-RPC 2.0 stdio response envelopes with a standard 36-char UUID request ID (`"00000000-0000-0000-0000-000000000000"`), `resultType: "tool_result"`, and `isError: False`.
-   - Guarantees that outer wire packets strictly satisfy `_wire_size(payload) <= 15360` bytes.
+3. **Empty Context Positive Regression Test & Envelope Assertions**:
+   - In `tests/test_mcp_server.py`, added `test_page_manager_connect_empty_context` verifying that an authentic CDP browser context containing zero pages resolves cleanly.
+   - Updated wire size assertions across all test cases to verify the 2026 envelope format with `resultType: "complete"` and `_meta.io.modelcontextprotocol/serverInfo`.
 
-4. **Iframe Action & Authentic CDP Test Coverage**:
-   - In `tests/test_mcp_server.py`, updated `test_page_manager_connect_positive_multi_context` to query real CDP `browserContextId` from `Target.getTargetInfo` with zero monkey-patching.
-   - Added `test_mcp_server_act_iframe_ref_hover_scroll` verifying that ref-targeted hover and scroll inside child iframes return the child frame's epoch and revision with complete `StateDelta` shape parity.
-   - Updated wire budget assertions to test MCP v2 JSON-RPC envelopes with UUID request IDs.
-
-5. **Full Regression Verification**:
-   - All 12 tests in `tests/test_mcp_server.py` pass.
-   - All 147 tests across the entire repository pass with exit code 0.
+4. **Full Regression Verification**:
+   - All 13 tests in `tests/test_mcp_server.py` pass.
+   - All 148 tests across the entire repository pass with exit code 0.
 
 ## Scope Modified
 
-- `src/browser_core/page_manager.py`: Implemented authentic CDP `browserContextId` lookup via `Target.getTargetInfo`.
-- `src/browser_core/mcp_server.py`: Enforced cross-frame `target_eval` for occlusion and revision checks, and modeled MCP v2 JSON-RPC response envelope in `_wire_size()`.
-- `tests/test_mcp_server.py`: Updated multi-context positive test for real CDP contexts, updated wire budget test assertions, and authored `test_mcp_server_act_iframe_ref_hover_scroll`.
+- `src/browser_core/page_manager.py`: Implemented empty leased context resolution via probe page in `PageManager.connect()`.
+- `src/browser_core/mcp_server.py`: Modeled MCP 2026-07-28 response envelope in `_wire_size()` and applied 256-byte transport reserve in `_is_over_budget()`.
+- `tests/test_mcp_server.py`: Added `test_page_manager_connect_empty_context` and updated wire envelope assertions for `resultType: "complete"` and `_meta`.
 - `scripts/dom_agent.js`: Maintained live `revision` getter and occlusion detection.
 - `scripts/cdp_controller.py`: Maintained `--mcp` CLI stdio runner with full backward compatibility.
 - `src/browser_core/contracts.py`: Maintained `ObservedNode.occluded` field.
@@ -54,13 +50,13 @@ In Attempt 6 (Final Polish Pass Authorized by Human Operator), completely resolv
    - `python3 scripts/lint_communication_records.py .agents/communication/results/task-001_mcp_server_foundation.md` -> PASSED
 
 2. **Targeted Subsystem Verification**:
-   - `pytest tests/test_mcp_server.py -v` -> 12/12 PASSED (0 failures)
+   - `pytest tests/test_mcp_server.py -v` -> 13/13 PASSED (0 failures)
    - `pytest tests/test_cli_legacy.py -v` -> 9/9 PASSED (0 failures)
    - `pytest tests/test_concurrency_broker.py` -> 29/29 PASSED (0 failures)
    - `pytest tests/test_recipes.py` -> 8/8 PASSED (0 failures)
 
 3. **Full Regression Suite**:
-   - `pytest tests/ -v` -> 147 passed, 0 failed in 99.38s (100% pass rate across entire repository).
+   - `pytest tests/ -v` -> 148 passed, 0 failed in 93.03s (100% pass rate across entire repository).
 
 4. **Whitespace & Git Hygiene**:
    - `git diff --check` -> 0 warnings (Clean).
