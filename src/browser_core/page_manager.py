@@ -35,9 +35,6 @@ def _reset_color_scheme(page: Any) -> None:
             pass
 
 
-_ACTIVE_BROWSERS: dict[str, Browser] = {}
-
-
 class PageManager:
     """Owns a CDP connection; it never starts or owns the production browser."""
 
@@ -70,20 +67,9 @@ class PageManager:
         parsed = urlparse(self.cdp_url)
         if self.test_mode and parsed.port == 17082:
             raise ValueError("Test mode refuses the live Chrome debugging port 17082")
-        if self.browser is None and self.browser_context_id and self.cdp_url in _ACTIVE_BROWSERS:
-            candidate = _ACTIVE_BROWSERS[self.cdp_url]
-            try:
-                if candidate.is_connected():
-                    for ctx in candidate.contexts:
-                        if getattr(ctx, "_browser_context_id", None) == self.browser_context_id:
-                            self.browser = candidate
-                            break
-            except Exception:
-                pass
         if self.browser is None:
             self._playwright = sync_playwright().start()
             self.browser = self._playwright.chromium.connect_over_cdp(self.cdp_url)
-            _ACTIVE_BROWSERS[self.cdp_url] = self.browser
         if self.browser_context_id:
             for ctx in self.browser.contexts:
                 if getattr(ctx, "_browser_context_id", None) == self.browser_context_id:
@@ -101,8 +87,6 @@ class PageManager:
 
     def close(self) -> None:
         if self.browser:
-            if _ACTIVE_BROWSERS.get(self.cdp_url) is self.browser:
-                _ACTIVE_BROWSERS.pop(self.cdp_url, None)
             if self._playwright is not None:
                 try:
                     self.browser.close()

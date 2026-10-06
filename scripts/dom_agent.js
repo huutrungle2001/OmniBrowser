@@ -187,6 +187,9 @@
   };
 
   const agent = {
+    get revision() {
+      return revision;
+    },
     setContext(frame, epoch) {
       context = { frame: String(frame), epoch: String(epoch) };
       return { ...context, revision };

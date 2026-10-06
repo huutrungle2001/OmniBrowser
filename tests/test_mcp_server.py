@@ -135,7 +135,16 @@ def test_mcp_server_core_tools_execution(ephemeral_cdp_url, fixture_server):
         assert "version" in obs_res
         assert "suggested_recipes" in obs_res
         encoded = json.dumps(obs_res, ensure_ascii=False).encode("utf-8")
-        assert len(encoded) <= MAX_OBSERVE_BUDGET_BYTES, f"Payload {len(encoded)} exceeds 15 KB limit"
+        assert len(encoded) <= MAX_OBSERVE_BUDGET_BYTES, f"Payload {len(encoded)} exceeds limit"
+        outer_packet = json.dumps({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [{"type": "text", "text": json.dumps(obs_res, ensure_ascii=False)}],
+                "is_error": False,
+            },
+        }, ensure_ascii=False)
+        assert len(outer_packet.encode("utf-8")) <= 15360, f"Outer packet {len(outer_packet.encode('utf-8'))} exceeds 15360 bytes"
 
         # Locate interactive elements
         name_input = next((n for n in obs_res["tree"] if n["role"] == "textbox" and n["name"] == "Name"), None)
@@ -174,6 +183,7 @@ def test_mcp_server_core_tools_execution(ephemeral_cdp_url, fixture_server):
         assert "revision" in hover_res
         assert isinstance(hover_res["revision"], int) and hover_res["revision"] >= 1
         assert hover_res["state_delta"] == {"revision": hover_res["revision"], "document_epoch": hover_res["document_epoch"]}
+        assert hover_res["delta"] == {"changed": [], "added": [], "removed": []}
         assert isinstance(hover_res.get("elapsed_ms"), (int, float))
         assert hover_res["action_duration_ms"] == hover_res["elapsed_ms"]
 
@@ -189,6 +199,7 @@ def test_mcp_server_core_tools_execution(ephemeral_cdp_url, fixture_server):
         assert "revision" in scroll_res
         assert isinstance(scroll_res["revision"], int) and scroll_res["revision"] >= 1
         assert scroll_res["state_delta"] == {"revision": scroll_res["revision"], "document_epoch": scroll_res["document_epoch"]}
+        assert scroll_res["delta"] == {"changed": [], "added": [], "removed": []}
         assert isinstance(scroll_res.get("elapsed_ms"), (int, float))
         assert scroll_res["action_duration_ms"] == scroll_res["elapsed_ms"]
 
@@ -496,6 +507,7 @@ def test_page_manager_connect_positive_multi_context(ephemeral_cdp_url):
         pm_leased = PageManager(
             ephemeral_cdp_url,
             test_mode=True,
+            browser=pm_setup.browser,
             browser_context_id="leased-ctx-positive-42",
         ).connect()
         assert pm_leased.context is ctx_b

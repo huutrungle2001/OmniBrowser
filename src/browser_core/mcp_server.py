@@ -31,6 +31,7 @@ from .contracts import (
     ObserveResult,
     ObservedNode,
     StaleRefError,
+    StateDelta,
     TargetNotFoundError,
 )
 from .engine import act
@@ -213,9 +214,21 @@ def _op_observe(worker: BrowserWorker, tab_id: str | None = None, match: str | N
         "suggested_recipes": getattr(obs, "suggested_recipes", []),
     }
 
-    # 1. Truncate tree nodes if payload exceeds 15 KB
-    encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    while len(encoded) > MAX_OBSERVE_BUDGET_BYTES and len(tree_nodes) > 0:
+    def _wire_size(p: dict) -> int:
+        raw_text = json.dumps(p, ensure_ascii=False)
+        wrapper = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"content": [{"type": "text", "text": raw_text}], "is_error": False},
+        }
+        return len(json.dumps(wrapper, ensure_ascii=False).encode("utf-8"))
+
+    def _is_over_budget(p: dict) -> bool:
+        encoded = json.dumps(p, ensure_ascii=False).encode("utf-8")
+        return len(encoded) > MAX_OBSERVE_BUDGET_BYTES or _wire_size(p) > 15360
+
+    # 1. Truncate tree nodes if over budget
+    while _is_over_budget(payload) and len(tree_nodes) > 0:
         cut = max(0, len(tree_nodes) * 4 // 5)
         if cut >= len(tree_nodes):
             cut = len(tree_nodes) - 1
@@ -223,24 +236,25 @@ def _op_observe(worker: BrowserWorker, tab_id: str | None = None, match: str | N
         payload["tree"] = tree_nodes
         payload["coverage"]["is_complete"] = False
         payload["coverage"]["truncated"] = True
-        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
-    # 2. If metadata alone exceeds 15 KB (e.g. huge data: URL or long strings), truncate metadata
-    if len(encoded) > MAX_OBSERVE_BUDGET_BYTES:
+    # 2. If metadata alone exceeds budget (e.g. huge data: URL or long strings), truncate metadata
+    if _is_over_budget(payload):
         payload["suggested_recipes"] = []
-        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
-    if len(encoded) > MAX_OBSERVE_BUDGET_BYTES:
-        max_url_len = max(50, len(payload["page_url"]) - (len(encoded) - MAX_OBSERVE_BUDGET_BYTES) - 50)
-        payload["page_url"] = payload["page_url"][:max_url_len] + "...[truncated]"
-        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    while _is_over_budget(payload) and len(payload["page_url"]) > 60:
+        excess = max(
+            len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) - MAX_OBSERVE_BUDGET_BYTES,
+            _wire_size(payload) - 15360,
+        )
+        cut_len = max(50, len(payload["page_url"]) - excess - 20)
+        payload["page_url"] = payload["page_url"][:cut_len] + "...[truncated]"
 
     # 3. Absolute Unconditional Hard Postcondition fallback
-    if len(encoded) > MAX_OBSERVE_BUDGET_BYTES:
+    if _is_over_budget(payload):
         payload = {
             "ok": True,
             "version": "1",
-            "page_url": payload["page_url"][:120] + "...[truncated]",
+            "page_url": payload["page_url"][:80] + "...[truncated]",
             "frame_id": str(payload.get("frame_id", ""))[:32],
             "document_epoch": str(payload.get("document_epoch", ""))[:32],
             "revision": payload.get("revision", 0),
@@ -248,10 +262,12 @@ def _op_observe(worker: BrowserWorker, tab_id: str | None = None, match: str | N
             "coverage": {"is_complete": False, "truncated": True},
             "suggested_recipes": [],
         }
-        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
-    # Hard invariant assertion: strictly guaranteed <= 15 KB
-    assert len(encoded) <= MAX_OBSERVE_BUDGET_BYTES, f"Hard budget invariant violated: {len(encoded)} > {MAX_OBSERVE_BUDGET_BYTES}"
+    # Hard invariant assertions: strictly guaranteed <= MAX_OBSERVE_BUDGET_BYTES and <= 15360 wire
+    raw_encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    wire_bytes = _wire_size(payload)
+    assert len(raw_encoded) <= MAX_OBSERVE_BUDGET_BYTES, f"Payload limit exceeded: {len(raw_encoded)} > {MAX_OBSERVE_BUDGET_BYTES}"
+    assert wire_bytes <= 15360, f"Outer wire budget exceeded: {wire_bytes} > 15360"
     return payload
 
 
@@ -315,7 +331,7 @@ def _op_act(
                         "ok": True,
                         "action": "hover",
                         "ref": ref,
-                        "delta": {},
+                        "delta": asdict(StateDelta()),
                         "state_delta": {"revision": rev, "document_epoch": doc_epoch},
                         "document_epoch": doc_epoch,
                         "revision": rev,
@@ -332,7 +348,7 @@ def _op_act(
                         "ok": True,
                         "action": "scroll",
                         "ref": ref,
-                        "delta": {},
+                        "delta": asdict(StateDelta()),
                         "state_delta": {"revision": rev, "document_epoch": doc_epoch},
                         "document_epoch": doc_epoch,
                         "revision": rev,
@@ -363,7 +379,7 @@ def _op_act(
                 "ok": True,
                 "action": "scroll",
                 "delta_y": delta_y,
-                "delta": {},
+                "delta": asdict(StateDelta()),
                 "state_delta": {"revision": rev, "document_epoch": doc_epoch},
                 "document_epoch": doc_epoch,
                 "revision": rev,
