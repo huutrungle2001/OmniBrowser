@@ -3,9 +3,9 @@
 RECORD_TYPE: TASK
 RECORD_ID: task-001_mcp_server_foundation
 STATUS: TASK_READY
-ATTEMPT: 5
+ATTEMPT: 6
 CREATED_AT: 2026-10-05T22:40:00Z
-UPDATED_AT: 2026-10-06T01:45:00Z
+UPDATED_AT: 2026-10-06T02:08:00Z
 FROM: orchestrator
 TO: implementer
 
@@ -13,61 +13,71 @@ TO: implementer
 
 Transform OmniBrowser into a standard high-performance Model Context Protocol (MCP) server over standard JSON-RPC 2.0 stdio transport.
 
-In Attempt 5 (Final Remediation Pass Authorized by Human Operator), resolve the final 4 architectural blockers identified in `review-task-001_mcp_server_foundation.md`:
-1. Greenlet Thread Affinity: Remove process-global `_ACTIVE_BROWSERS` cache from `src/browser_core/page_manager.py` to preserve Playwright synchronous thread affinity.
-2. Live DOM Revision Getter: Add `get revision() { return revision; }` on `agent` in `scripts/dom_agent.js` and return `delta: {"changed": [], "added": [], "removed": []}` (`StateDelta`) in `_op_act`.
-3. Outer JSON-RPC Wire Payload Bound: In `src/browser_core/mcp_server.py`, verify that the fully wrapped and serialized JSON-RPC 2.0 response packet is strictly $\le 15$ KB (15,360 bytes).
-4. Clean Multi-Context Test: Update `test_page_manager_connect_positive_multi_context` to test multi-context isolation cleanly without cross-thread global caches.
+In Attempt 6 (Final Polish Pass Authorized by Human Operator), resolve the final 3 architectural and backward-compatibility issues identified in `review-task-001_mcp_server_foundation.md`:
+1. Cross-Frame State & Occlusion Parity: For ref-targeted actions in `src/browser_core/mcp_server.py`, evaluate revision and occlusion using `(frame if frame else page).evaluate(...)` so iframe elements return the target frame's authoritative revision and epoch.
+2. Authentic Chrome CDP Context Resolution: In `src/browser_core/page_manager.py`, resolve `self.browser_context_id` by inspecting active contexts and querying genuine Chrome CDP `browserContextId` via `Target.getTargetInfo` through `ctx.new_cdp_session(page)`, eliminating synthetic attribute dependence.
+3. Formal Invariant 3 Wire Modeling: In `src/browser_core/mcp_server.py`, model `_wire_size()` using standard MCP v2 JSON-RPC response envelopes with 36-char UUID request IDs (`"00000000-0000-0000-0000-000000000000"`), `resultType: "tool_result"`, and `isError: False`, guaranteeing `_wire_size(payload) <= 15360` bytes. Formally document the invariant scope.
+4. Iframe Action Test Coverage: In `tests/test_mcp_server.py`, author a test verifying ref-based hover/scroll targeting an iframe element, and update multi-context tests to use genuine CDP context resolution with zero monkey-patching.
 
 ## Scope
 
 ### Leased Files & Paths:
-1. `src/browser_core/page_manager.py`:
-   - Remove `_ACTIVE_BROWSERS` global dictionary completely.
-   - Keep `browser: Browser | None = None` parameter in `PageManager.__init__`.
-   - In `PageManager.connect()`, start Playwright and connect over CDP strictly on the caller's thread when `self.browser is None`. Maintain fail-closed `RuntimeError` when `self.browser_context_id` is not found in `self.browser.contexts`.
-   - In `PageManager.close()`, close `self.browser` only if owned by this instance (`self._playwright is not None`).
+1. `src/browser_core/mcp_server.py`:
+   - In `_op_act`:
+     - When `ref` is provided, resolve `frame = manager._frame_for_token(page, dom_ref.frame)`.
+     - Target evaluation context: `target_eval = frame if frame is not None else page`.
+     - Occlusion check: execute `target_eval.evaluate("el => window[Symbol.for('__OMNI_DOM_AGENT__')]?.isOccluded?.(el)", handle)`.
+     - Hover/Scroll revision: execute `int(target_eval.evaluate("() => window[Symbol.for('__OMNI_DOM_AGENT__')]?.revision || 1"))`.
+   - In `_wire_size`:
+     - Update simulated envelope to include MCP v2 `resultType: "tool_result"` and 36-char UUID request ID (`"00000000-0000-0000-0000-000000000000"`):
+       ```python
+       wrapper = {
+           "jsonrpc": "2.0",
+           "id": "00000000-0000-0000-0000-000000000000",
+           "result": {
+               "resultType": "tool_result",
+               "content": [{"type": "text", "text": raw_text}],
+               "isError": False,
+           },
+       }
+       ```
+     - Enforce `_wire_size(payload) <= 15360` bytes.
+     - Document that Invariant 3 bounds server-controlled `CallToolResult` payloads and standard JSON-RPC 2.0 stdio framing.
 
-2. `scripts/dom_agent.js`:
-   - In `agent` object definition, add:
-     ```javascript
-     get revision() {
-       return revision;
-     },
-     ```
-     so `window[Symbol.for('__OMNI_DOM_AGENT__')]?.revision` returns the authoritative in-browser revision.
+2. `src/browser_core/page_manager.py`:
+   - In `PageManager.connect()`:
+     - When `self.browser_context_id` is supplied:
+       - Iterate over `self.browser.contexts`.
+       - First check if `getattr(ctx, "_browser_context_id", None) == self.browser_context_id`.
+       - If not yet matched, for contexts with active pages (`ctx.pages`), attach a temporary CDP session (`session = ctx.new_cdp_session(p)`) and query `Target.getTargetInfo` to extract `info.get("targetInfo", {}).get("browserContextId")`.
+       - If `browserContextId == self.browser_context_id`, tag `ctx._browser_context_id = self.browser_context_id`, assign `self.context = ctx`, and break.
+       - If not found across all contexts, fail closed with `RuntimeError(f"Leased browser context '{self.browser_context_id}' not found in active contexts")`.
 
-3. `src/browser_core/mcp_server.py`:
-   - In `_op_act`, return `delta: asdict(StateDelta())` (`{"changed": [], "added": [], "removed": []}`) and `state_delta: {"revision": rev, "document_epoch": doc_epoch}` on hover and window scroll to achieve 100% `ActResult` contract parity.
-   - In `_op_observe`, ensure the postcondition guarantees the serialized outer JSON-RPC response strictly satisfies $\le 15$ KB (15,360 bytes):
-     ```python
-     def _wire_size(p: dict) -> int:
-         raw_text = json.dumps(p, ensure_ascii=False)
-         wrapper = {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": raw_text}], "is_error": False}}
-         return len(json.dumps(wrapper, ensure_ascii=False).encode("utf-8"))
-     ```
-     Ensure `_wire_size(payload) <= 15360` before returning.
-
-4. `tests/test_mcp_server.py`:
-   - Update `test_page_manager_connect_positive_multi_context` to pass `browser=pm_setup.browser` directly, testing positive multi-context binding within the same thread.
-   - Assert `delta` in hover and scroll responses contains `{"changed": [], "added": [], "removed": []}`.
-   - Assert outer JSON-RPC packet size $\le 15360$ bytes.
+3. `tests/test_mcp_server.py`:
+   - In `test_page_manager_connect_positive_multi_context`:
+     - Remove monkey-patching (`ctx_b._browser_context_id = ...`).
+     - Obtain real CDP `browserContextId` by creating a page in `ctx_b`, attaching `session = ctx_b.new_cdp_session(page_b)`, sending `Target.getTargetInfo`, and reading `info["targetInfo"]["browserContextId"]`.
+     - Connect `pm_leased` with `browser_context_id=real_cdp_context_id`, and assert `pm_leased.context is ctx_b`.
+   - Add `test_mcp_server_act_iframe_ref_hover_scroll`:
+     - Load a page with an iframe fixture (e.g. `nested_frames.html` or similar), observe DOM to get a ref inside the iframe, perform hover/scroll, and assert `state_delta` matches the iframe's epoch and revision.
+   - Update wire budget test assertions to verify envelope with UUID request ID $\le 15,360$ bytes.
 
 ## Acceptance Criteria
 
-1. **Thread Affinity Invariant**:
-   - `_ACTIVE_BROWSERS` process-global cache completely removed from `src/browser_core/page_manager.py`. All Playwright operations confined strictly to initiating thread.
-2. **Authoritative Revision & StateDelta Shape**:
-   - `window[Symbol.for('__OMNI_DOM_AGENT__')].revision` returns live integer revision.
-   - `_op_act` hover and scroll responses return `delta` matching `StateDelta` shape (`{"changed": [], "added": [], "removed": []}`) and `state_delta: {"revision": rev, "document_epoch": doc_epoch}`.
-3. **Hard Outer Wire Budget Invariant (Invariant 3)**:
-   - Serialized JSON-RPC 2.0 tool result packet $\le 15$ KB (15,360 bytes) across all inputs.
-4. **Full Regression Passing**:
-   - `pytest tests/test_mcp_server.py -v` passes 100%.
-   - `pytest tests/ -v` passes 100% across the entire repository (146+ tests, 0 failures).
-5. **Result Record & Notification**:
-   - Update `.agents/communication/results/task-001_mcp_server_foundation.md` for Attempt 5.
-   - Lint communication records and notify `omni_reviewer`.
+1. **Cross-Frame State & Occlusion Parity**:
+   - Ref-targeted actions inside iframes query revision and occlusion in the target frame context (`target_eval = frame if frame is not None else page`), returning consistent `document_epoch` and `revision`.
+2. **Authentic CDP Context Resolution**:
+   - `PageManager.connect()` resolves leased browser contexts via real Chrome CDP `Target.getTargetInfo` without relying on synthetic monkey-patching.
+   - Fail-closed behavior on missing or invalid context IDs remains strictly enforced.
+3. **Formal Invariant 3 Wire Modeling**:
+   - `_wire_size()` models standard MCP v2 JSON-RPC envelopes with 36-char UUID request IDs and `resultType: "tool_result"`, guaranteeing that the outer wire packet is $\le 15$ KB (15,360 bytes).
+4. **Comprehensive Regression Passing**:
+   - `pytest tests/test_mcp_server.py -v` passes 100% including new iframe ref action and authentic CDP context tests.
+   - `pytest tests/ -v` passes 100% across the entire repository (147+ tests, 0 failures).
+   - Zero live profile pollution: tests never connect to port 17082.
+5. **Clean Handoff**:
+   - Result record updated and committed.
+   - `python3 scripts/lint_communication_records.py` passes with exit code 0.
 
 ## Validation
 
