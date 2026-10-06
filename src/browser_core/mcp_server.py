@@ -17,26 +17,9 @@ from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
 
-try:
-    from mcp.server.mcpserver import MCPServer
-    FastMCP = MCPServer
-except ImportError:
-    try:
-        from mcp.server.fastmcp import FastMCP
-        MCPServer = FastMCP
-    except ImportError as exc:
-        raise ImportError(
-            "OmniBrowser MCP server requires high-level FastMCP/MCPServer support (mcp>=1.0.0)."
-        ) from exc
-
-try:
-    from mcp.server.mcpserver.exceptions import ToolError
-except ImportError:
-    try:
-        from mcp.server.fastmcp.exceptions import ToolError
-    except ImportError:
-        class ToolError(Exception):
-            pass
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+FastMCP = MCPServer
 
 from .contracts import (
     ActionTimeoutError,
@@ -56,7 +39,7 @@ from .primitives import inspect as inspect_primitive, runBrowserCode
 from .recipes import RecipeEngine, RecipeStore
 
 DEFAULT_CDP_URL = os.environ.get("CDP_URL", "http://127.0.0.1:17082")
-MAX_OBSERVE_BUDGET_BYTES = 15 * 1024  # 15 KB JSON budget
+MAX_OBSERVE_BUDGET_BYTES = 13500  # 13.5 KB content budget ensuring total wire JSON <= 15 KB (15,360 bytes)
 
 
 class BrowserWorker:
@@ -317,7 +300,10 @@ def _op_act(
                 frame = manager._frame_for_token(page, dom_ref.frame)
                 state = manager._frame_state(frame)
                 doc_epoch = f"d{state.epoch}"
-                rev = state.revision
+            except Exception:
+                pass
+            try:
+                rev = int(page.evaluate("() => window[Symbol.for('__OMNI_DOM_AGENT__')]?.revision || 1"))
             except Exception:
                 pass
 
@@ -330,10 +316,11 @@ def _op_act(
                         "action": "hover",
                         "ref": ref,
                         "delta": {},
-                        "state_delta": {},
+                        "state_delta": {"revision": rev, "document_epoch": doc_epoch},
                         "document_epoch": doc_epoch,
                         "revision": rev,
                         "elapsed_ms": elapsed_ms,
+                        "action_duration_ms": elapsed_ms,
                     }
                 except Exception as error:
                     raise ToolError(f"Hover action failed on {ref}: {error}") from error
@@ -346,10 +333,11 @@ def _op_act(
                         "action": "scroll",
                         "ref": ref,
                         "delta": {},
-                        "state_delta": {},
+                        "state_delta": {"revision": rev, "document_epoch": doc_epoch},
                         "document_epoch": doc_epoch,
                         "revision": rev,
                         "elapsed_ms": elapsed_ms,
+                        "action_duration_ms": elapsed_ms,
                     }
                 except Exception as error:
                     raise ToolError(f"Scroll action failed on {ref}: {error}") from error
@@ -365,7 +353,10 @@ def _op_act(
             try:
                 state = manager._frame_state(page.main_frame)
                 doc_epoch = f"d{state.epoch}"
-                rev = state.revision
+            except Exception:
+                pass
+            try:
+                rev = int(page.evaluate("() => window[Symbol.for('__OMNI_DOM_AGENT__')]?.revision || 1"))
             except Exception:
                 pass
             return {
@@ -373,10 +364,11 @@ def _op_act(
                 "action": "scroll",
                 "delta_y": delta_y,
                 "delta": {},
-                "state_delta": {},
+                "state_delta": {"revision": rev, "document_epoch": doc_epoch},
                 "document_epoch": doc_epoch,
                 "revision": rev,
                 "elapsed_ms": elapsed_ms,
+                "action_duration_ms": elapsed_ms,
             }
         except Exception as error:
             raise ToolError(f"Window scroll failed: {error}") from error
@@ -400,6 +392,7 @@ def _op_act(
         "document_epoch": res.document_epoch,
         "revision": res.revision,
         "elapsed_ms": res.action_duration_ms,
+        "action_duration_ms": res.action_duration_ms,
     }
 
 

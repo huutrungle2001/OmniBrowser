@@ -172,8 +172,10 @@ def test_mcp_server_core_tools_execution(ephemeral_cdp_url, fixture_server):
         assert hover_res["action"] == "hover"
         assert "document_epoch" in hover_res
         assert "revision" in hover_res
-        assert "state_delta" in hover_res
+        assert isinstance(hover_res["revision"], int) and hover_res["revision"] >= 1
+        assert hover_res["state_delta"] == {"revision": hover_res["revision"], "document_epoch": hover_res["document_epoch"]}
         assert isinstance(hover_res.get("elapsed_ms"), (int, float))
+        assert hover_res["action_duration_ms"] == hover_res["elapsed_ms"]
 
         # Contract parity on window scroll (no ref)
         scroll_res = _call_tool_sync(
@@ -185,8 +187,10 @@ def test_mcp_server_core_tools_execution(ephemeral_cdp_url, fixture_server):
         assert scroll_res["action"] == "scroll"
         assert "document_epoch" in scroll_res
         assert "revision" in scroll_res
-        assert "state_delta" in scroll_res
+        assert isinstance(scroll_res["revision"], int) and scroll_res["revision"] >= 1
+        assert scroll_res["state_delta"] == {"revision": scroll_res["revision"], "document_epoch": scroll_res["document_epoch"]}
         assert isinstance(scroll_res.get("elapsed_ms"), (int, float))
+        assert scroll_res["action_duration_ms"] == scroll_res["elapsed_ms"]
 
         # 5. browser_run_code (verify explicit timeout_ms and default timeout_ms=None)
         code_res = _call_tool_sync(
@@ -377,6 +381,15 @@ def test_mcp_server_observe_hard_15kb_boundary(ephemeral_cdp_url):
         assert len(encoded_b) <= MAX_OBSERVE_BUDGET_BYTES, f"URL truncation failed: {len(encoded_b)} bytes"
         assert "[truncated]" in obs_b["page_url"]
 
+        async def _check_wire_payload():
+            res_b = await server.call_tool("browser_observe", {})
+            wire_call_tool_json = res_b.model_dump_json() if hasattr(res_b, "model_dump_json") else json.dumps(res_b.model_dump())
+            assert len(wire_call_tool_json.encode("utf-8")) <= 15360, f"CallToolResult wire size {len(wire_call_tool_json.encode('utf-8'))} exceeds 15 KB"
+            jsonrpc_b = json.dumps({"jsonrpc": "2.0", "id": 1, "result": res_b.model_dump()})
+            assert len(jsonrpc_b.encode("utf-8")) <= 15360, f"JSON-RPC wire size {len(jsonrpc_b.encode('utf-8'))} exceeds 15 KB"
+
+        anyio.run(_check_wire_payload)
+
     finally:
         server.browser_worker.shutdown()
 
@@ -470,6 +483,29 @@ def test_page_manager_connect_fail_closed_missing_context(ephemeral_cdp_url):
         pm.close()
 
 
+def test_page_manager_connect_positive_multi_context(ephemeral_cdp_url):
+    """Verifies Invariants 8 & 10: PageManager binds to the exact leased context among multiple contexts."""
+    from browser_core.page_manager import PageManager
+
+    pm_setup = PageManager(ephemeral_cdp_url, test_mode=True).connect()
+    try:
+        ctx_a = pm_setup.browser.new_context()
+        ctx_b = pm_setup.browser.new_context()
+        ctx_b._browser_context_id = "leased-ctx-positive-42"
+
+        pm_leased = PageManager(
+            ephemeral_cdp_url,
+            test_mode=True,
+            browser_context_id="leased-ctx-positive-42",
+        ).connect()
+        assert pm_leased.context is ctx_b
+        assert pm_leased.context is not ctx_a
+        assert getattr(pm_leased.context, "_browser_context_id", None) == "leased-ctx-positive-42"
+        pm_leased.close()
+    finally:
+        pm_setup.close()
+
+
 def test_mcp_server_observe_structured_output_is_none(ephemeral_cdp_url, fixture_server):
     """Verifies Invariant 3 wire-level budget: structured_content is None and text payload <= 15 KB."""
     server = create_mcp_server(ephemeral_cdp_url, test_mode=True)
@@ -484,6 +520,12 @@ def test_mcp_server_observe_structured_output_is_none(ephemeral_cdp_url, fixture
             assert hasattr(res, "content") and len(res.content) == 1
             payload_text = res.content[0].text
             assert len(payload_text.encode("utf-8")) <= MAX_OBSERVE_BUDGET_BYTES
+
+            # Verify total serialized JSON-RPC 2.0 / CallToolResult wire JSON payload <= 15 KB (15,360 bytes)
+            wire_call_tool_json = res.model_dump_json() if hasattr(res, "model_dump_json") else json.dumps(res.model_dump())
+            assert len(wire_call_tool_json.encode("utf-8")) <= 15360, f"CallToolResult wire size {len(wire_call_tool_json.encode('utf-8'))} exceeds 15 KB"
+            jsonrpc_wrapper = json.dumps({"jsonrpc": "2.0", "id": 1, "result": res.model_dump()})
+            assert len(jsonrpc_wrapper.encode("utf-8")) <= 15360, f"JSON-RPC wire payload {len(jsonrpc_wrapper.encode('utf-8'))} exceeds 15 KB"
 
         anyio.run(_check_wire_result)
 

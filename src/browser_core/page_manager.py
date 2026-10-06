@@ -35,6 +35,9 @@ def _reset_color_scheme(page: Any) -> None:
             pass
 
 
+_ACTIVE_BROWSERS: dict[str, Browser] = {}
+
+
 class PageManager:
     """Owns a CDP connection; it never starts or owns the production browser."""
 
@@ -45,6 +48,7 @@ class PageManager:
         *,
         test_mode: bool = False,
         context: BrowserContext | None = None,
+        browser: Browser | None = None,
         browser_context_id: str | None = None,
         recipe_store: Any = None,
     ):
@@ -53,7 +57,7 @@ class PageManager:
         self.recipe_store = recipe_store
         self.agent_source = agent_source or Path(__file__).parents[2].joinpath("scripts", "dom_agent.js").read_text()
         self._playwright: Playwright | None = None
-        self.browser: Browser | None = None
+        self.browser: Browser | None = browser
         self.context: BrowserContext | None = context
         self.browser_context_id: str | None = browser_context_id
         self._frames: dict[object, _FrameState] = {}
@@ -66,8 +70,20 @@ class PageManager:
         parsed = urlparse(self.cdp_url)
         if self.test_mode and parsed.port == 17082:
             raise ValueError("Test mode refuses the live Chrome debugging port 17082")
-        self._playwright = sync_playwright().start()
-        self.browser = self._playwright.chromium.connect_over_cdp(self.cdp_url)
+        if self.browser is None and self.browser_context_id and self.cdp_url in _ACTIVE_BROWSERS:
+            candidate = _ACTIVE_BROWSERS[self.cdp_url]
+            try:
+                if candidate.is_connected():
+                    for ctx in candidate.contexts:
+                        if getattr(ctx, "_browser_context_id", None) == self.browser_context_id:
+                            self.browser = candidate
+                            break
+            except Exception:
+                pass
+        if self.browser is None:
+            self._playwright = sync_playwright().start()
+            self.browser = self._playwright.chromium.connect_over_cdp(self.cdp_url)
+            _ACTIVE_BROWSERS[self.cdp_url] = self.browser
         if self.browser_context_id:
             for ctx in self.browser.contexts:
                 if getattr(ctx, "_browser_context_id", None) == self.browser_context_id:
@@ -85,10 +101,19 @@ class PageManager:
 
     def close(self) -> None:
         if self.browser:
-            self.browser.close()
+            if _ACTIVE_BROWSERS.get(self.cdp_url) is self.browser:
+                _ACTIVE_BROWSERS.pop(self.cdp_url, None)
+            if self._playwright is not None:
+                try:
+                    self.browser.close()
+                except Exception:
+                    pass
             self.browser = None
         if self._playwright:
-            self._playwright.stop()
+            try:
+                self._playwright.stop()
+            except Exception:
+                pass
             self._playwright = None
 
     def __enter__(self) -> "PageManager":
