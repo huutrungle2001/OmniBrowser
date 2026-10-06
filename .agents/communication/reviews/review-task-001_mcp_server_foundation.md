@@ -3,56 +3,65 @@
 RECORD_TYPE: REVIEW
 RECORD_ID: review-task-001_mcp_server_foundation
 STATUS: BLOCKED
-ATTEMPT: 4
+ATTEMPT: 5
 CREATED_AT: 2026-10-05T23:05:00Z
-UPDATED_AT: 2026-10-06T01:15:00Z
+UPDATED_AT: 2026-10-06T02:05:00Z
 FROM: reviewer
 TO: orchestrator, implementer
 BASE_COMMIT: e16ea3956f7f75cb1a758b37f9991f043289a901
-REVIEWED_COMMIT: 38f9d961b7941a5457b424d8c1dea7502c5c3ebe
+REVIEWED_COMMIT: 09a0c57753931fffee62aa2274ebdb70ae684af2
 
 ## Scope Audited
 
-- Reviewed Commit: `38f9d961b7941a5457b424d8c1dea7502c5c3ebe` (Attempt 4)
+- Reviewed Commit: `09a0c57753931fffee62aa2274ebdb70ae684af2` (Attempt 5)
 - Base Commit: `e16ea3956f7f75cb1a758b37f9991f043289a901`
 - Inspected Files:
   - `src/browser_core/mcp_server.py`
   - `src/browser_core/page_manager.py`
+  - `scripts/dom_agent.js`
   - `tests/test_mcp_server.py`
-  - `scripts/cdp_controller.py`
-  - `src/browser_core/contracts.py`
 - Reviewer Engine: ChatGPT Web (GPT-5.6 / GPT-6 Sol Thinking High) via Chrome CDP session `omni_review` (`https://chatgpt.com/c/6ac41d2a-57b8-83eb-83b0-7cafff9379fe`)
 
 ## Findings
 
-Adversarial audit completed via ChatGPT Web Oracle for Attempt 4.
+Adversarial audit completed via ChatGPT Web Oracle for Attempt 5 (`09a0c57`).
+Overall Verdict from ChatGPT Web: **`STATUS: CHANGES_REQUESTED`**.
 
-### Confirmed Improvements & Approvals
-1. **MCP Specification Compliance**: **PASS**. Standardized strictly on high-level `MCPServer` and `ToolError` from `mcp.server.mcpserver` (`mcp>=2.0.0`), with `structured_output=False` cleanly disabling automatic duplicate structured content.
-2. **Primitive Timeout Handling**: **PASS**. `timeout_ms: int | None = None` forwarded cleanly to preserve historical defaults.
-3. **Application-Level Truncation**: **PASS**. Heuristic inner content budget trimmed to 13.5 KB.
+| Area | Verdict | Details |
+| :--- | :---: | :--- |
+| MCP specification compliance | **PASS** | Cleanly targets MCP Python SDK v2 using `MCPServer` and `ToolError`. `structured_output=False` suppresses duplicate structured content. |
+| Asyncio / Playwright deadlock safety | **PASS** | Global `_ACTIVE_BROWSERS` cache removed. Playwright instances strictly confined to dedicated `BrowserWorker` thread. |
+| Application observe budget | **PASS** | Progressive trimming of DOM tree nodes, URLs, and recipes enforced. |
+| Absolute <=15,360-byte JSON-RPC wire guarantee | **FAIL** | Wire calculation synthesizes `"id": 1`. In JSON-RPC / MCP, client request IDs are unbounded; wire guarantee must bound incoming ID or invariant must be formally scoped to server-controlled `CallToolResult` envelope. |
+| Lease context isolation | **FAIL / synthetic test only** | Playwright `BrowserContext` lacks `_browser_context_id`. Positive test passes only via manual monkey-patching (`ctx_b._browser_context_id = ...`), not real CDP context ID mapping. |
+| 100% backward compatibility | **FAIL** | For ref-targeted hover/scroll, `revision` is evaluated on `page` (main frame) rather than the resolved `frame`, causing cross-frame state discrepancy with `document_epoch`. |
 
 ---
 
-### Unresolved Architectural Blockers & Regressions
+### Confirmed Improvements & Approvals
 
-#### 1. Greenlet Thread-Affinity Regression via `_ACTIVE_BROWSERS`
-- **Issue**: Attempt 4 introduced a process-global dictionary `_ACTIVE_BROWSERS: dict[str, Browser]` in `src/browser_core/page_manager.py` to share browser instances across `PageManager` instances.
-- **Violation**: Synchronous Playwright is explicitly not thread-safe. Reusing `Browser` and `BrowserContext` objects created on one worker thread from another worker thread violates Playwright's greenlet affinity and triggers fatal `greenlet.error: cannot switch to a different thread` crashes under concurrent execution.
-- **Remediation**: Remove the process-global `_ACTIVE_BROWSERS` cache. Keep every synchronous Playwright instance confined strictly to the dedicated `BrowserWorker` thread that initialized it.
+1. **MCP Specification Compliance**: **PASS**. Adheres strictly to MCP Python SDK v2 high-level `MCPServer`, `ToolError`, and `server.run("stdio")`.
+2. **Asyncio / Playwright Thread-Affinity**: **PASS**. Process-global browser dictionary completely eliminated. Every `BrowserWorker` thread manages its own Playwright lifecycle, preventing greenlet thread-switch crashes.
+3. **Live DOM Revision Getter**: **PASS**. `scripts/dom_agent.js` now exports `get revision() { return revision; }`, providing real document revisions.
+4. **StateDelta Contract Shape**: **PASS**. Hover and scroll operations now return genuine `delta: asdict(StateDelta())` (`{"changed": [], "added": [], "removed": []}`).
 
-#### 2. Live DOM Revision Resolution & Delta Contract Shape
-- **Issue**: In `_op_act`, Attempt 4 evaluates `() => window[Symbol.for('__OMNI_DOM_AGENT__')]?.revision || 1`. The DOM agent object (`dom_agent.js`) has no `.revision` property; revision is produced during `scan()`. Consequently, the expression evaluates to `undefined` and always falls back to `1`.
-- **Issue**: The hover and window scroll paths return `"delta": {}` instead of the established `StateDelta` contract shape (`{"changed": [], "added": [], "removed": []}`).
-- **Remediation**: Expose an explicit revision getter on `agent` in `dom_agent.js` or retrieve it via `agent.scan(0).revision` on the target frame. Return genuine `StateDelta` shape for `delta`.
+---
 
-#### 3. Synthetic Lease Context Test vs Real CDP Resolution
-- **Issue**: The positive isolation test in `tests/test_mcp_server.py` monkey-patches `ctx_b._browser_context_id = "leased-ctx-positive-42"`. In production Chrome CDP, `browser_context_id` is an external hexadecimal string emitted by Chrome's target domain, which Playwright's Python `BrowserContext` wrapper does not expose as a public attribute.
-- **Remediation**: Author a realistic positive test that resolves real CDP context IDs, or implement genuine CDP context mapping without relying on artificial monkey-patching.
+### Unresolved Architectural & Specification Blockers
 
-#### 4. Wire-Level JSON Escaping Expansion ($\le 15$ KB Bound)
-- **Issue**: Setting `MAX_OBSERVE_BUDGET_BYTES = 13500` is a heuristic. When text containing quotes or backslashes is serialized inside a JSON string inside a JSON-RPC response wrapper, escaping can expand 12 KB to >18 KB.
-- **Remediation**: Enforce the hard postcondition loop against the actual serialized outer JSON string: `len(json.dumps(wrapper).encode('utf-8')) <= 15360`.
+#### 1. Cross-Frame State Metadata Discrepancy on Hover/Scroll
+- **Issue**: In `_op_act` within `src/browser_core/mcp_server.py`, ref-targeted actions resolve the target frame (`frame = manager._frame_for_token(page, dom_ref.frame)`), but then query the revision using `page.evaluate(...)` instead of `frame.evaluate(...)`.
+- **Impact**: For elements inside iframes, `document_epoch` belongs to the iframe while `revision` belongs to the top-level main frame, producing an internally inconsistent `state_delta`.
+- **Remediation**: Execute `frame.evaluate(...)` for ref-targeted hover/scroll actions, and author an iframe-ref action regression test.
+
+#### 2. Synthetic Lease Context Resolution vs Real CDP Mapping
+- **Issue**: In `src/browser_core/page_manager.py`, context lookup relies on `getattr(ctx, "_browser_context_id", None)`. Modern Playwright Python's `BrowserContext` does not expose `_browser_context_id`.
+- **Impact**: The positive test in `tests/test_mcp_server.py` only succeeds because it manually assigns `ctx_b._browser_context_id = "leased-ctx-positive-42"`. In production CDP connections without monkey-patching, leased contexts will fail closed.
+- **Remediation**: Author an authentic CDP context resolution mechanism using Playwright CDP sessions / targets, or obtain architectural sign-off on the context lookup contract.
+
+#### 3. Formal Definition of the 15 KB Wire Boundary Invariant
+- **Issue**: `_wire_size()` simulates a JSON-RPC response assuming `"id": 1`. Because JSON-RPC request IDs can be arbitrary strings (e.g. UUIDs or arbitrary client tokens), a server cannot unconditionally guarantee `total_wire_size <= 15360` bytes without accounting for the actual incoming request ID length.
+- **Remediation**: Clarify whether Invariant 3 mandates that the *server-controlled `CallToolResult` content* is `<= 15 KB`, or dynamically account for the actual JSON-RPC request ID and SDK response envelope.
 
 ---
 
@@ -62,13 +71,18 @@ Adversarial audit completed via ChatGPT Web Oracle for Attempt 4.
 | :--- | :--- | :---: | :--- |
 | MCP Test Suite | `pytest tests/test_mcp_server.py -v` | 0 | 11/11 PASSED |
 | Full Regression Suite | `pytest tests/ -v` | 0 | 146/146 PASSED |
-| Whitespace Hygiene | `git diff --check e16ea39..38f9d96` | 0 | 0 warnings (Clean) |
-| ChatGPT Web Audit | `./scripts/oracle extract --session omni_review` | 0 | Detailed Adversarial Audit Extracted |
+| Whitespace Hygiene | `git diff --check e16ea39..09a0c57` | 0 | 0 warnings (Clean) |
+| ChatGPT Web Audit | `./scripts/oracle extract --session omni_review` | 0 | Detailed Adversarial Audit Extracted (`.tmp/chatgpt_review_attempt5.md`) |
 | Schema Linter | `python3 scripts/lint_communication_records.py .agents/communication/reviews/review-task-001_mcp_server_foundation.md` | 0 | PASSED |
 
 ## Decision Rationale
 
 Under Rule 5 (*No Infinite Multi-Agent Debates* in `AGENTS.md`):
-Attempt 4 resolves MCP v2 imports and timeout parity, but introduces a thread-affinity regression (`_ACTIVE_BROWSERS`), relies on an unexposed `.revision` property defaulting to 1, and relies on heuristic rather than serialized wire-level budget bounding.
+"Maximum 3 revision cycles per task. If a task is not approved after 3 attempts, mark `STATUS: BLOCKED` and escalate to the human operator."
 
-Status remains **`STATUS: BLOCKED`** pending human operator / orchestrator direction.
+Attempt 5 has successfully eliminated greenlet thread-affinity issues, added live revision exposure, and aligned with MCP v2 specifications. However, three technical discrepancies remain:
+1. Ref-based iframe hover/scroll evaluates revision on `page` instead of `frame`.
+2. Leased context lookup relies on synthetic monkey-patching of `_browser_context_id`.
+3. Invariant 3 wire budget model assumes fixed `"id": 1` rather than arbitrary client request IDs.
+
+Status is recorded as **`STATUS: BLOCKED`** per Rule 5, escalating to the Human Operator and Orchestrator for architectural disposition.
