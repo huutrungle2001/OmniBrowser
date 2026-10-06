@@ -215,11 +215,21 @@ def _op_observe(worker: BrowserWorker, tab_id: str | None = None, match: str | N
     }
 
     def _wire_size(p: dict) -> int:
+        """Models standard MCP v2 JSON-RPC 2.0 stdio response envelope.
+
+        Guarantees Invariant 3 wire-level budget (<= 15,360 bytes / 15 KB)
+        accounting for a standard 36-character UUID client request ID,
+        tool result envelope formatting, and JSON text payload.
+        """
         raw_text = json.dumps(p, ensure_ascii=False)
         wrapper = {
             "jsonrpc": "2.0",
-            "id": 1,
-            "result": {"content": [{"type": "text", "text": raw_text}], "is_error": False},
+            "id": "00000000-0000-0000-0000-000000000000",
+            "result": {
+                "resultType": "tool_result",
+                "content": [{"type": "text", "text": raw_text}],
+                "isError": False,
+            },
         }
         return len(json.dumps(wrapper, ensure_ascii=False).encode("utf-8"))
 
@@ -295,10 +305,20 @@ def _op_act(
         if handle is None:
             raise ToolError(f"Stale ref {ref}; call browser_observe to refresh refs")
 
+        frame = None
+        try:
+            frame = manager._frame_for_token(page, dom_ref.frame)
+        except Exception:
+            pass
+        target_eval = frame if frame is not None else page
+
         # Occlusion detection: Avoid clicking covered elements
         if action_lower == "click":
             try:
-                is_occ = page.evaluate("el => window[Symbol.for('__OMNI_DOM_AGENT__')]?.isOccluded?.(el)", handle)
+                is_occ = target_eval.evaluate(
+                    "el => window[Symbol.for('__OMNI_DOM_AGENT__')]?.isOccluded?.(el)",
+                    handle,
+                )
                 if is_occ:
                     raise ToolError(
                         f"Element {ref} is occluded by another element/modal; cannot click covered target."
@@ -311,15 +331,15 @@ def _op_act(
         if action_lower in {"hover", "scroll"}:
             start_time = time.monotonic()
             doc_epoch = "d1"
-            rev = 1
+            rev = 0
+            if frame is not None:
+                try:
+                    state = manager._frame_state(frame)
+                    doc_epoch = f"d{state.epoch}"
+                except Exception:
+                    pass
             try:
-                frame = manager._frame_for_token(page, dom_ref.frame)
-                state = manager._frame_state(frame)
-                doc_epoch = f"d{state.epoch}"
-            except Exception:
-                pass
-            try:
-                rev = int(page.evaluate("() => window[Symbol.for('__OMNI_DOM_AGENT__')]?.revision || 1"))
+                rev = int(target_eval.evaluate("() => window[Symbol.for('__OMNI_DOM_AGENT__')]?.revision ?? 0"))
             except Exception:
                 pass
 
@@ -365,14 +385,14 @@ def _op_act(
             page.mouse.wheel(0, delta_y)
             elapsed_ms = round((time.monotonic() - start_time) * 1000)
             doc_epoch = "d1"
-            rev = 1
+            rev = 0
             try:
                 state = manager._frame_state(page.main_frame)
                 doc_epoch = f"d{state.epoch}"
             except Exception:
                 pass
             try:
-                rev = int(page.evaluate("() => window[Symbol.for('__OMNI_DOM_AGENT__')]?.revision || 1"))
+                rev = int(page.evaluate("() => window[Symbol.for('__OMNI_DOM_AGENT__')]?.revision ?? 0"))
             except Exception:
                 pass
             return {

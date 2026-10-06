@@ -138,10 +138,11 @@ def test_mcp_server_core_tools_execution(ephemeral_cdp_url, fixture_server):
         assert len(encoded) <= MAX_OBSERVE_BUDGET_BYTES, f"Payload {len(encoded)} exceeds limit"
         outer_packet = json.dumps({
             "jsonrpc": "2.0",
-            "id": 1,
+            "id": "00000000-0000-0000-0000-000000000000",
             "result": {
+                "resultType": "tool_result",
                 "content": [{"type": "text", "text": json.dumps(obs_res, ensure_ascii=False)}],
-                "is_error": False,
+                "isError": False,
             },
         }, ensure_ascii=False)
         assert len(outer_packet.encode("utf-8")) <= 15360, f"Outer packet {len(outer_packet.encode('utf-8'))} exceeds 15360 bytes"
@@ -396,7 +397,15 @@ def test_mcp_server_observe_hard_15kb_boundary(ephemeral_cdp_url):
             res_b = await server.call_tool("browser_observe", {})
             wire_call_tool_json = res_b.model_dump_json() if hasattr(res_b, "model_dump_json") else json.dumps(res_b.model_dump())
             assert len(wire_call_tool_json.encode("utf-8")) <= 15360, f"CallToolResult wire size {len(wire_call_tool_json.encode('utf-8'))} exceeds 15 KB"
-            jsonrpc_b = json.dumps({"jsonrpc": "2.0", "id": 1, "result": res_b.model_dump()})
+            jsonrpc_b = json.dumps({
+                "jsonrpc": "2.0",
+                "id": "00000000-0000-0000-0000-000000000000",
+                "result": {
+                    "resultType": "tool_result",
+                    "content": [{"type": "text", "text": res_b.content[0].text}],
+                    "isError": False,
+                },
+            })
             assert len(jsonrpc_b.encode("utf-8")) <= 15360, f"JSON-RPC wire size {len(jsonrpc_b.encode('utf-8'))} exceeds 15 KB"
 
         anyio.run(_check_wire_payload)
@@ -495,27 +504,81 @@ def test_page_manager_connect_fail_closed_missing_context(ephemeral_cdp_url):
 
 
 def test_page_manager_connect_positive_multi_context(ephemeral_cdp_url):
-    """Verifies Invariants 8 & 10: PageManager binds to the exact leased context among multiple contexts."""
+    """Verifies Invariants 8 & 10: PageManager binds to the exact leased context via authentic CDP resolution."""
     from browser_core.page_manager import PageManager
 
     pm_setup = PageManager(ephemeral_cdp_url, test_mode=True).connect()
     try:
         ctx_a = pm_setup.browser.new_context()
+        _page_a = ctx_a.new_page()
         ctx_b = pm_setup.browser.new_context()
-        ctx_b._browser_context_id = "leased-ctx-positive-42"
+        page_b = ctx_b.new_page()
 
+        # Query authentic Chrome CDP browserContextId for ctx_b
+        session = ctx_b.new_cdp_session(page_b)
+        info = session.send("Target.getTargetInfo")
+        session.detach()
+        real_ctx_id = info["targetInfo"]["browserContextId"]
+        assert real_ctx_id, "Chrome CDP did not return a valid browserContextId"
+
+        # Connect PageManager with authentic CDP context ID (zero monkey-patching)
         pm_leased = PageManager(
             ephemeral_cdp_url,
             test_mode=True,
             browser=pm_setup.browser,
-            browser_context_id="leased-ctx-positive-42",
+            browser_context_id=real_ctx_id,
         ).connect()
         assert pm_leased.context is ctx_b
         assert pm_leased.context is not ctx_a
-        assert getattr(pm_leased.context, "_browser_context_id", None) == "leased-ctx-positive-42"
+        assert getattr(pm_leased.context, "_browser_context_id", None) == real_ctx_id
         pm_leased.close()
     finally:
         pm_setup.close()
+
+
+def test_mcp_server_act_iframe_ref_hover_scroll(ephemeral_cdp_url, fixture_server):
+    """Verifies ref-targeted hover and scroll operations inside an iframe return iframe's epoch and revision."""
+    server = create_mcp_server(ephemeral_cdp_url, test_mode=True)
+    try:
+        _call_tool_sync(server, "browser_navigate", {"url": f"{fixture_server}/interactive_page.html"})
+
+        def _get_iframe_ref():
+            manager = server.browser_worker.get_manager()
+            page = manager.primary_page()
+            child_frame = next(f for f in page.frames if f != page.main_frame)
+            child_obs = manager.observe(page, frame=child_frame)
+            btn_node = next(n for n in child_obs.tree if "Frame" in n.name or n.role == "button")
+            return str(btn_node.ref), child_obs.document_epoch, child_obs.revision
+
+        iframe_ref, expected_epoch, expected_rev = server.browser_worker.run(_get_iframe_ref)
+
+        # Execute hover via browser_act
+        hover_res = _call_tool_sync(server, "browser_act", {"action": "hover", "ref": iframe_ref})
+        assert hover_res["ok"] is True
+        assert hover_res["action"] == "hover"
+        assert hover_res["ref"] == iframe_ref
+        assert hover_res["document_epoch"] == expected_epoch
+        assert hover_res["revision"] == expected_rev
+        assert hover_res["state_delta"]["document_epoch"] == expected_epoch
+        assert hover_res["state_delta"]["revision"] == expected_rev
+        assert "changed" in hover_res["delta"]
+        assert "added" in hover_res["delta"]
+        assert "removed" in hover_res["delta"]
+
+        # Execute scroll via browser_act
+        scroll_res = _call_tool_sync(server, "browser_act", {"action": "scroll", "ref": iframe_ref})
+        assert scroll_res["ok"] is True
+        assert scroll_res["action"] == "scroll"
+        assert scroll_res["ref"] == iframe_ref
+        assert scroll_res["document_epoch"] == expected_epoch
+        assert scroll_res["revision"] == expected_rev
+        assert scroll_res["state_delta"]["document_epoch"] == expected_epoch
+        assert scroll_res["state_delta"]["revision"] == expected_rev
+        assert "changed" in scroll_res["delta"]
+        assert "added" in scroll_res["delta"]
+        assert "removed" in scroll_res["delta"]
+    finally:
+        server.browser_worker.shutdown()
 
 
 def test_mcp_server_observe_structured_output_is_none(ephemeral_cdp_url, fixture_server):
@@ -536,7 +599,15 @@ def test_mcp_server_observe_structured_output_is_none(ephemeral_cdp_url, fixture
             # Verify total serialized JSON-RPC 2.0 / CallToolResult wire JSON payload <= 15 KB (15,360 bytes)
             wire_call_tool_json = res.model_dump_json() if hasattr(res, "model_dump_json") else json.dumps(res.model_dump())
             assert len(wire_call_tool_json.encode("utf-8")) <= 15360, f"CallToolResult wire size {len(wire_call_tool_json.encode('utf-8'))} exceeds 15 KB"
-            jsonrpc_wrapper = json.dumps({"jsonrpc": "2.0", "id": 1, "result": res.model_dump()})
+            jsonrpc_wrapper = json.dumps({
+                "jsonrpc": "2.0",
+                "id": "00000000-0000-0000-0000-000000000000",
+                "result": {
+                    "resultType": "tool_result",
+                    "content": [{"type": "text", "text": payload_text}],
+                    "isError": False,
+                },
+            })
             assert len(jsonrpc_wrapper.encode("utf-8")) <= 15360, f"JSON-RPC wire payload {len(jsonrpc_wrapper.encode('utf-8'))} exceeds 15 KB"
 
         anyio.run(_check_wire_result)

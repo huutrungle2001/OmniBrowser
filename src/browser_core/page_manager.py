@@ -75,6 +75,25 @@ class PageManager:
                 if getattr(ctx, "_browser_context_id", None) == self.browser_context_id:
                     self.context = ctx
                     break
+                for p in ctx.pages:
+                    try:
+                        session = ctx.new_cdp_session(p)
+                        try:
+                            info = session.send("Target.getTargetInfo")
+                            ctx_id = info.get("targetInfo", {}).get("browserContextId")
+                            if ctx_id == self.browser_context_id:
+                                ctx._browser_context_id = self.browser_context_id
+                                self.context = ctx
+                                break
+                        finally:
+                            try:
+                                session.detach()
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                if self.context:
+                    break
             if not self.context:
                 raise RuntimeError(
                     f"Leased browser context '{self.browser_context_id}' not found in active contexts"
