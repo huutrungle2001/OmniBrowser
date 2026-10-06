@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
+import time
 from typing import Any
 import weakref
 
@@ -71,45 +72,76 @@ class PageManager:
             self._playwright = sync_playwright().start()
             self.browser = self._playwright.chromium.connect_over_cdp(self.cdp_url)
         if self.browser_context_id:
+            # 1. Fast path: check already-tagged contexts
             for ctx in self.browser.contexts:
                 if getattr(ctx, "_browser_context_id", None) == self.browser_context_id:
                     self.context = ctx
                     break
 
-                created_probe = False
-                p = None
-                try:
+            # 2. Inspect active contexts with existing pages read-only (zero page creation)
+            if not self.context:
+                for ctx in self.browser.contexts:
                     if ctx.pages:
-                        p = ctx.pages[0]
-                    else:
-                        p = ctx.new_page()
-                        created_probe = True
+                        try:
+                            session = ctx.new_cdp_session(ctx.pages[0])
+                            try:
+                                info = session.send("Target.getTargetInfo")
+                                ctx_id = info.get("targetInfo", {}).get("browserContextId")
+                                if ctx_id == self.browser_context_id:
+                                    ctx._browser_context_id = self.browser_context_id
+                                    self.context = ctx
+                                    break
+                            finally:
+                                try:
+                                    session.detach()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                    if self.context:
+                        break
 
-                    session = ctx.new_cdp_session(p)
+            # 3. For empty contexts, create target directly in Chrome exclusively for the requested context
+            if not self.context:
+                try:
+                    b_session = self.browser.new_browser_cdp_session()
                     try:
-                        info = session.send("Target.getTargetInfo")
-                        ctx_id = info.get("targetInfo", {}).get("browserContextId")
-                        if ctx_id == self.browser_context_id:
-                            ctx._browser_context_id = self.browser_context_id
-                            self.context = ctx
-                            created_probe = False  # retain page for subsequent operations
-                            break
+                        b_session.send(
+                            "Target.createTarget",
+                            {"url": "about:blank", "browserContextId": self.browser_context_id},
+                        )
+                        # Target created exclusively in self.browser_context_id; discover matching context
+                        for _ in range(10):
+                            for ctx in self.browser.contexts:
+                                for p in ctx.pages:
+                                    try:
+                                        p_session = ctx.new_cdp_session(p)
+                                        try:
+                                            info = p_session.send("Target.getTargetInfo")
+                                            if info.get("targetInfo", {}).get("browserContextId") == self.browser_context_id:
+                                                ctx._browser_context_id = self.browser_context_id
+                                                self.context = ctx
+                                                break
+                                        finally:
+                                            try:
+                                                p_session.detach()
+                                            except Exception:
+                                                pass
+                                    except Exception:
+                                        pass
+                                if self.context:
+                                    break
+                            if self.context:
+                                break
+                            time.sleep(0.05)
                     finally:
                         try:
-                            session.detach()
+                            b_session.detach()
                         except Exception:
                             pass
                 except Exception:
                     pass
-                finally:
-                    if created_probe and p is not None:
-                        try:
-                            p.close()
-                        except Exception:
-                            pass
 
-                if self.context:
-                    break
             if not self.context:
                 raise RuntimeError(
                     f"Leased browser context '{self.browser_context_id}' not found in active contexts"

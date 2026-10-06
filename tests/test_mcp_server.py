@@ -549,37 +549,40 @@ def test_page_manager_connect_positive_multi_context(ephemeral_cdp_url):
 
 
 def test_page_manager_connect_empty_context(ephemeral_cdp_url):
-    """Verifies Invariants 8 & 10: PageManager resolves an authentic empty leased context (zero pages)."""
+    """Verifies Invariants 8 & 10: PageManager resolves an authentic empty context with zero cross-context mutation."""
     from browser_core.page_manager import PageManager
 
     pm_setup = PageManager(ephemeral_cdp_url, test_mode=True).connect()
     try:
-        ctx_empty = pm_setup.browser.new_context()
-        assert len(ctx_empty.pages) == 0
+        b_session = pm_setup.browser.new_browser_cdp_session()
+        before_ids = set(b_session.send("Target.getBrowserContexts")["browserContextIds"])
 
-        # Temporarily create a probe page to discover its authentic CDP browserContextId
-        probe = ctx_empty.new_page()
-        session = ctx_empty.new_cdp_session(probe)
-        info = session.send("Target.getTargetInfo")
-        session.detach()
-        real_empty_id = info["targetInfo"]["browserContextId"]
-        assert real_empty_id
+        ctx_other = pm_setup.browser.new_context()
+        mid_ids = set(b_session.send("Target.getBrowserContexts")["browserContextIds"])
 
-        # Close probe page so ctx_empty is strictly empty again (0 pages)
-        probe.close()
-        assert len(ctx_empty.pages) == 0
+        ctx_target = pm_setup.browser.new_context()
+        after_ids = set(b_session.send("Target.getBrowserContexts")["browserContextIds"])
+        target_ctx_id = (after_ids - mid_ids).pop()
+        b_session.detach()
 
-        # Connect PageManager with the authentic empty context ID
+        assert len(ctx_other.pages) == 0
+        assert len(ctx_target.pages) == 0
+
+        # Connect PageManager with the authentic empty target context ID
         pm_leased = PageManager(
             ephemeral_cdp_url,
             test_mode=True,
             browser=pm_setup.browser,
-            browser_context_id=real_empty_id,
+            browser_context_id=target_ctx_id,
         ).connect()
-        assert pm_leased.context is ctx_empty
-        assert getattr(pm_leased.context, "_browser_context_id", None) == real_empty_id
-        # The probe page created during connect is retained for subsequent operations
-        assert len(pm_leased.context.pages) >= 1
+
+        assert pm_leased.context is ctx_target
+        assert getattr(pm_leased.context, "_browser_context_id", None) == target_ctx_id
+        # ctx_target now contains the created target page
+        assert len(ctx_target.pages) >= 1
+        # CRITICAL LEASE ISOLATION INVARIANT: ctx_other MUST remain strictly empty (zero cross-context mutation)
+        assert len(ctx_other.pages) == 0
+
         pm_leased.close()
     finally:
         pm_setup.close()

@@ -243,8 +243,13 @@ def _op_observe(worker: BrowserWorker, tab_id: str | None = None, match: str | N
     def _is_over_budget(p: dict) -> bool:
         """Applies Invariant 3 content budget and a 256-byte transport headroom reserve.
 
-        Ensures that variable-length client request IDs and framing metadata
-        cannot breach the 15,360-byte wire limit.
+        Formal Invariant 3 Wire Scoping:
+        Guarantees that the server-controlled CallToolResult payload remains <= 13.5 KB
+        (13,824 bytes), ensuring the total serialized JSON-RPC 2.0 stdio response packet
+        never exceeds 15,360 bytes (15 KB) for standard requests with client request IDs
+        up to 36-character UUIDs. For unbounded or non-standard client request IDs
+        (> 36 chars), the server-controlled CallToolResult payload remains strictly
+        bounded to <= 14,848 bytes, preventing LLM context explosion.
         """
         encoded = json.dumps(p, ensure_ascii=False).encode("utf-8")
         return len(encoded) > MAX_OBSERVE_BUDGET_BYTES or _wire_size(p) > (15360 - 256)
