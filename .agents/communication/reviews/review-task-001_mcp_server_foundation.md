@@ -3,17 +3,17 @@
 RECORD_TYPE: REVIEW
 RECORD_ID: review-task-001_mcp_server_foundation
 STATUS: BLOCKED
-ATTEMPT: 3
+ATTEMPT: 4
 CREATED_AT: 2026-10-05T23:05:00Z
-UPDATED_AT: 2026-10-05T23:42:00Z
+UPDATED_AT: 2026-10-06T01:15:00Z
 FROM: reviewer
 TO: orchestrator, implementer
 BASE_COMMIT: e16ea3956f7f75cb1a758b37f9991f043289a901
-REVIEWED_COMMIT: e8c80a906fd60f51ab3d0a5c111ea294617d9028
+REVIEWED_COMMIT: 38f9d961b7941a5457b424d8c1dea7502c5c3ebe
 
 ## Scope Audited
 
-- Reviewed Commit: `e8c80a906fd60f51ab3d0a5c111ea294617d9028` (Attempt 3)
+- Reviewed Commit: `38f9d961b7941a5457b424d8c1dea7502c5c3ebe` (Attempt 4)
 - Base Commit: `e16ea3956f7f75cb1a758b37f9991f043289a901`
 - Inspected Files:
   - `src/browser_core/mcp_server.py`
@@ -25,32 +25,34 @@ REVIEWED_COMMIT: e8c80a906fd60f51ab3d0a5c111ea294617d9028
 
 ## Findings
 
-Adversarial audit completed via ChatGPT Web Oracle for Attempt 3.
+Adversarial audit completed via ChatGPT Web Oracle for Attempt 4.
 
-### Successfully Verified Components
-1. **Asyncio / Playwright Deadlock Safety**: **PASS**. Dedicated single-thread worker pattern preserves greenlet thread affinity; 10-call concurrent async test verified without race conditions.
-2. **Scanner Idempotency**: **PASS**. Scanner registration re-bootstraps frames without accumulating duplicate CDP sessions.
-3. **Restored Primitive Timeout Defaults**: **PASS**. `browser_run_code` default `timeout_ms: int | None = None` correctly forwards `None`, preserving historical 2,000 ms read / 10,000 ms write primitive defaults.
-4. **Application-Level 15KB Postcondition**: **PASS**. Multi-tier progressive trimming guarantees inner application observe JSON $\le 15$ KB.
+### Confirmed Improvements & Approvals
+1. **MCP Specification Compliance**: **PASS**. Standardized strictly on high-level `MCPServer` and `ToolError` from `mcp.server.mcpserver` (`mcp>=2.0.0`), with `structured_output=False` cleanly disabling automatic duplicate structured content.
+2. **Primitive Timeout Handling**: **PASS**. `timeout_ms: int | None = None` forwarded cleanly to preserve historical defaults.
+3. **Application-Level Truncation**: **PASS**. Heuristic inner content budget trimmed to 13.5 KB.
 
 ---
 
-### Unresolved Invariants & Architectural Blockers
+### Unresolved Architectural Blockers & Regressions
 
-#### 1. `browser_act` Hover/Scroll Contract Parity & Revision Attribute Error
-- **Root Cause**: `_op_act` attempts to read `state.revision` from `state = manager._frame_state(...)`. In `src/browser_core/page_manager.py`, `_FrameState` is defined with only `(token, epoch)` and has **no `revision` attribute**.
-- **Impact**: Reading `state.revision` raises `AttributeError`, which is swallowed by `except Exception: pass`, silently falling back to hardcoded `rev = 1`.
-- **Contract Mismatch**: The established `ActResult.state_delta` is `{"revision": self.revision, "document_epoch": self.document_epoch}` and includes `action_duration_ms`. The MCP implementation returns `"state_delta": {}`, `"delta": {}`, and omits `action_duration_ms`, violating 100% backward compatibility.
+#### 1. Greenlet Thread-Affinity Regression via `_ACTIVE_BROWSERS`
+- **Issue**: Attempt 4 introduced a process-global dictionary `_ACTIVE_BROWSERS: dict[str, Browser]` in `src/browser_core/page_manager.py` to share browser instances across `PageManager` instances.
+- **Violation**: Synchronous Playwright is explicitly not thread-safe. Reusing `Browser` and `BrowserContext` objects created on one worker thread from another worker thread violates Playwright's greenlet affinity and triggers fatal `greenlet.error: cannot switch to a different thread` crashes under concurrent execution.
+- **Remediation**: Remove the process-global `_ACTIVE_BROWSERS` cache. Keep every synchronous Playwright instance confined strictly to the dedicated `BrowserWorker` thread that initialized it.
 
-#### 2. Lease Context Lookup Mechanism (`_browser_context_id` Non-Existence)
-- **Root Cause**: In `PageManager.connect()`, context matching inspects `getattr(ctx, "_browser_context_id", None) == self.browser_context_id`. Playwright Python's `BrowserContext` implementation does not expose `_browser_context_id`.
-- **Impact**: While the fail-closed check prevents silent fallback to `contexts[0]`, every valid non-null lease context ID will fail to match and raise `RuntimeError`. A real CDP-to-Playwright context mapping and a positive multi-context test (creating 2 contexts and verifying isolation) are required.
+#### 2. Live DOM Revision Resolution & Delta Contract Shape
+- **Issue**: In `_op_act`, Attempt 4 evaluates `() => window[Symbol.for('__OMNI_DOM_AGENT__')]?.revision || 1`. The DOM agent object (`dom_agent.js`) has no `.revision` property; revision is produced during `scan()`. Consequently, the expression evaluates to `undefined` and always falls back to `1`.
+- **Issue**: The hover and window scroll paths return `"delta": {}` instead of the established `StateDelta` contract shape (`{"changed": [], "added": [], "removed": []}`).
+- **Remediation**: Expose an explicit revision getter on `agent` in `dom_agent.js` or retrieve it via `agent.scan(0).revision` on the target frame. Return genuine `StateDelta` shape for `delta`.
 
-#### 3. Total Wire-Level JSON-RPC Transport Budget
-- **Observation**: `structured_output=False` successfully prevents duplicate structured content. However, the test only checks `len(res.content[0].text.encode("utf-8"))`. When serialized into `CallToolResult` and enveloped in JSON-RPC 2.0 with string escaping, a 15.25 KB observe JSON expands beyond 15 KB on the wire. A safety margin (e.g. 13.5 KB content limit) is required to guarantee total wire payload $\le 15$ KB.
+#### 3. Synthetic Lease Context Test vs Real CDP Resolution
+- **Issue**: The positive isolation test in `tests/test_mcp_server.py` monkey-patches `ctx_b._browser_context_id = "leased-ctx-positive-42"`. In production Chrome CDP, `browser_context_id` is an external hexadecimal string emitted by Chrome's target domain, which Playwright's Python `BrowserContext` wrapper does not expose as a public attribute.
+- **Remediation**: Author a realistic positive test that resolves real CDP context IDs, or implement genuine CDP context mapping without relying on artificial monkey-patching.
 
-#### 4. MCP SDK Generation & Protocol Specification
-- **Observation**: Module still falls back to legacy `FastMCP` (`mcp>=1.0.0`) and tests only the legacy `initialize()` lifecycle. Pinning to `mcp>=2.0.0` or providing dedicated modern `2026-07-28` protocol verification is required to guarantee modern specification compliance.
+#### 4. Wire-Level JSON Escaping Expansion ($\le 15$ KB Bound)
+- **Issue**: Setting `MAX_OBSERVE_BUDGET_BYTES = 13500` is a heuristic. When text containing quotes or backslashes is serialized inside a JSON string inside a JSON-RPC response wrapper, escaping can expand 12 KB to >18 KB.
+- **Remediation**: Enforce the hard postcondition loop against the actual serialized outer JSON string: `len(json.dumps(wrapper).encode('utf-8')) <= 15360`.
 
 ---
 
@@ -58,15 +60,15 @@ Adversarial audit completed via ChatGPT Web Oracle for Attempt 3.
 
 | Check | Command Executed by Reviewer | Exit Code | Outcome |
 | :--- | :--- | :---: | :--- |
-| MCP Test Suite | `pytest tests/test_mcp_server.py -v` | 0 | 10/10 PASSED |
-| Full Regression Suite | `pytest tests/ -v` | 0 | 145/145 PASSED |
-| Whitespace Hygiene | `git diff --check e16ea39..e8c80a9` | 0 | 0 warnings (Clean) |
+| MCP Test Suite | `pytest tests/test_mcp_server.py -v` | 0 | 11/11 PASSED |
+| Full Regression Suite | `pytest tests/ -v` | 0 | 146/146 PASSED |
+| Whitespace Hygiene | `git diff --check e16ea39..38f9d96` | 0 | 0 warnings (Clean) |
 | ChatGPT Web Audit | `./scripts/oracle extract --session omni_review` | 0 | Detailed Adversarial Audit Extracted |
 | Schema Linter | `python3 scripts/lint_communication_records.py .agents/communication/reviews/review-task-001_mcp_server_foundation.md` | 0 | PASSED |
 
 ## Decision Rationale
 
 Under Rule 5 (*No Infinite Multi-Agent Debates* in `AGENTS.md`):
-> "Maximum 3 revision cycles per task. If a task is not approved after 3 attempts, mark `STATUS: BLOCKED` and escalate to the human operator."
+Attempt 4 resolves MCP v2 imports and timeout parity, but introduces a thread-affinity regression (`_ACTIVE_BROWSERS`), relies on an unexposed `.revision` property defaulting to 1, and relies on heuristic rather than serialized wire-level budget bounding.
 
-Because Attempt 3 concludes the third revision cycle with contract parity, context ID mapping, and transport budget issues remaining unresolved, the review is formally marked **`STATUS: BLOCKED`** and escalated to the human operator / orchestrator for guidance.
+Status remains **`STATUS: BLOCKED`** pending human operator / orchestrator direction.
