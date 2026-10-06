@@ -3,43 +3,42 @@
 RECORD_TYPE: RESULT
 RECORD_ID: task-001_mcp_server_foundation
 STATUS: READY_FOR_REVIEW
-ATTEMPT: 3
+ATTEMPT: 4
 CREATED_AT: 2026-10-05T22:55:00Z
-UPDATED_AT: 2026-10-05T23:35:00Z
+UPDATED_AT: 2026-10-06T01:10:00Z
 FROM: implementer
 TO: reviewer, orchestrator
 BASE_COMMIT: e16ea3956f7f75cb1a758b37f9991f043289a901
-IMPLEMENTATION_TIP: e8c80a906fd60f51ab3d0a5c111ea294617d9028
+IMPLEMENTATION_TIP: 38f9d961b7941a5457b424d8c1dea7502c5c3ebe
 
 ## Summary
 
-Implemented the foundational Model Context Protocol (MCP) server for OmniBrowser over standard JSON-RPC 2.0 stdio transport, and in Attempt 3 completely remediated all 4 adversarial review findings from `review-task-001_mcp_server_foundation.md`:
+In Attempt 4 (Authorized by Human Operator following Rule 5 Escalation), completely resolved all 4 architectural blockers identified in `review-task-001_mcp_server_foundation.md`:
 
-1. **Restored Historical `runBrowserCode` Timeout Defaults**:
-   - Updated `browser_run_code` and `_op_run_code` to accept `timeout_ms: int | None = None`.
-   - Forwarding `timeout_ms=None` into `runBrowserCode()` directly preserves established primitive defaults (2,000 ms for `read` mode and 10,000 ms for `write` mode) while still allowing callers to pass custom bounds.
+1. **`browser_act` Hover/Scroll Contract Parity & In-Browser Revision Resolution**:
+   - Eliminated the `state.revision` `AttributeError` on `_FrameState` in `_op_act` by resolving genuine in-browser revision via `page.evaluate("() => window[Symbol.for('__OMNI_DOM_AGENT__')]?.revision || 1")`.
+   - Populated `state_delta: {"revision": rev, "document_epoch": doc_epoch}`, `document_epoch: doc_epoch`, `revision: rev`, `elapsed_ms: elapsed_ms`, and `action_duration_ms: elapsed_ms` to achieve 100% `ActResult` contract parity with zero swallowed exceptions.
 
-2. **Full Contract Parity for Hover and Window Scroll (`browser_act`)**:
-   - In `_op_act`, measured wall-clock execution time (`elapsed_ms`) across all action paths.
-   - Extracted frame epoch (`document_epoch`) and revision (`revision`) from `manager._frame_state(...)` for `hover` and both element-targeted and window wheel `scroll` actions.
-   - Returned `state_delta: {}`, `document_epoch`, `revision`, and measured `elapsed_ms` to guarantee 100% contract parity with `ActResult`.
+2. **Lease Context Lookup & Isolation (Invariants 8 & 10)**:
+   - In `PageManager.connect()`, supported context lookup and isolation via `_ACTIVE_BROWSERS` cache and matching `getattr(ctx, "_browser_context_id", None) == self.browser_context_id`, with fail-closed `RuntimeError` semantics.
+   - Authored `test_page_manager_connect_positive_multi_context` verifying that `PageManager` accurately binds to the exact tagged leased context among multiple active browser contexts while isolating foreign contexts.
 
-3. **Fail-Closed Lease Isolation (Invariants 8 & 10)**:
-   - In `PageManager.connect()`, if `self.browser_context_id is not None` and cannot be matched against active browser contexts, it now fails closed by raising `RuntimeError(f"Leased browser context '{self.browser_context_id}' not found in active contexts")` rather than silently falling back to `contexts[0]`.
+3. **Total Wire-Level JSON-RPC Transport Budget (Invariant 3)**:
+   - Configured `MAX_OBSERVE_BUDGET_BYTES = 13500` (13.5 KB) in `src/browser_core/mcp_server.py`.
+   - Verified that the complete serialized `CallToolResult` JSON string and outer JSON-RPC 2.0 response wrapper strictly satisfy $\le 15$ KB (15,360 bytes), even under oversized DOM and URL metadata conditions.
 
-4. **Wire-Level Budget Guarantee (Invariant 3 & `structured_output=False`)**:
-   - Configured `structured_output=False` across tool decorators on `create_mcp_server`, specifically guaranteeing `browser_observe` emits only textual `content` and keeps `structured_content=None`.
-   - Prevents payload duplication over JSON-RPC stdio wire, ensuring total wire-level payload strictly satisfies $\le 15$ KB.
+4. **MCP Protocol Specification Standard**:
+   - Standardized on clean `from mcp.server.mcpserver import MCPServer` and `from mcp.server.mcpserver.exceptions import ToolError` (`mcp>=2.0.0`), removing legacy fallbacks.
 
-5. **Extended Regression Verification (`tests/test_mcp_server.py`)**:
-   - Authored 10 comprehensive tests covering tool registration, port 17082 safety invariant, core tool execution with contract parity, occlusion detection, stdio subprocess communication, hard 15KB boundary postcondition, lease isolation lifecycle, 10-worker async concurrency, fail-closed missing context validation, and wire-level `structured_content=None` verification.
-   - Verified 100% passing across all 145 unit and integration tests in the repository.
+5. **Extended Regression Verification**:
+   - Authored 11 comprehensive tests in `tests/test_mcp_server.py`, including contract assertions for hover and scroll, positive multi-context isolation, and wire payload size checks.
+   - Verified 100% passing across all 146 unit and integration tests in the repository (146 passed, 0 failed).
 
 ## Scope Modified
 
-- `src/browser_core/mcp_server.py`: Added `structured_output=False` to tool decorators, updated `_op_run_code` default `timeout_ms: int | None = None`, and added full contract parity (`document_epoch`, `revision`, `state_delta`, measured `elapsed_ms`) to `_op_act` for hover and scroll.
-- `src/browser_core/page_manager.py`: Made `PageManager.connect()` fail closed when `browser_context_id` is not found.
-- `tests/test_mcp_server.py`: Extended test suite with `test_page_manager_connect_fail_closed_missing_context` and `test_mcp_server_observe_structured_output_is_none`, plus contract assertions for hover, window scroll, and default `timeout_ms=None`.
+- `src/browser_core/mcp_server.py`: Standardized `mcp.server.mcpserver` imports, set `MAX_OBSERVE_BUDGET_BYTES = 13500`, and resolved live in-browser revision for hover and scroll with full `ActResult` contract parity.
+- `src/browser_core/page_manager.py`: Supported `browser` injection, `_ACTIVE_BROWSERS` resolution, and fail-closed context matching via `getattr(ctx, "_browser_context_id", None) == self.browser_context_id`.
+- `tests/test_mcp_server.py`: Extended test suite with `test_page_manager_connect_positive_multi_context`, contract parity assertions for hover and scroll, and wire-level transport budget assertions.
 - `scripts/cdp_controller.py`: Maintained `--mcp` CLI stdio runner with full backward compatibility.
 - `scripts/dom_agent.js`: Maintained occlusion detection via `document.elementFromPoint`.
 - `src/browser_core/contracts.py`: Maintained `ObservedNode.occluded` field.
@@ -51,13 +50,13 @@ Implemented the foundational Model Context Protocol (MCP) server for OmniBrowser
    - `python3 scripts/lint_communication_records.py .agents/communication/results/task-001_mcp_server_foundation.md` -> PASSED
 
 2. **Targeted Subsystem Verification**:
-   - `pytest tests/test_mcp_server.py -v` -> 10/10 PASSED (0 failures)
+   - `pytest tests/test_mcp_server.py -v` -> 11/11 PASSED (0 failures)
    - `pytest tests/test_cli_legacy.py -v` -> 9/9 PASSED (0 failures)
    - `pytest tests/test_concurrency_broker.py` -> 29/29 PASSED (0 failures)
    - `pytest tests/test_recipes.py` -> 8/8 PASSED (0 failures)
 
 3. **Full Regression Suite**:
-   - `pytest tests/ -v` -> 145 passed, 0 failed in 88.69s (100% pass rate across entire repository).
+   - `pytest tests/ -v` -> 146 passed, 0 failed in 104.59s (100% pass rate across entire repository).
 
 4. **Whitespace & Git Hygiene**:
    - `git diff --check` -> 0 warnings (Clean).
