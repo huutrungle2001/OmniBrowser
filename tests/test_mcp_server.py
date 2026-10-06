@@ -140,7 +140,13 @@ def test_mcp_server_core_tools_execution(ephemeral_cdp_url, fixture_server):
             "jsonrpc": "2.0",
             "id": "00000000-0000-0000-0000-000000000000",
             "result": {
-                "resultType": "tool_result",
+                "resultType": "complete",
+                "_meta": {
+                    "io.modelcontextprotocol/serverInfo": {
+                        "name": "omnibrowser",
+                        "version": "1.0.0",
+                    }
+                },
                 "content": [{"type": "text", "text": json.dumps(obs_res, ensure_ascii=False)}],
                 "isError": False,
             },
@@ -401,7 +407,13 @@ def test_mcp_server_observe_hard_15kb_boundary(ephemeral_cdp_url):
                 "jsonrpc": "2.0",
                 "id": "00000000-0000-0000-0000-000000000000",
                 "result": {
-                    "resultType": "tool_result",
+                    "resultType": "complete",
+                    "_meta": {
+                        "io.modelcontextprotocol/serverInfo": {
+                            "name": "omnibrowser",
+                            "version": "1.0.0",
+                        }
+                    },
                     "content": [{"type": "text", "text": res_b.content[0].text}],
                     "isError": False,
                 },
@@ -536,6 +548,43 @@ def test_page_manager_connect_positive_multi_context(ephemeral_cdp_url):
         pm_setup.close()
 
 
+def test_page_manager_connect_empty_context(ephemeral_cdp_url):
+    """Verifies Invariants 8 & 10: PageManager resolves an authentic empty leased context (zero pages)."""
+    from browser_core.page_manager import PageManager
+
+    pm_setup = PageManager(ephemeral_cdp_url, test_mode=True).connect()
+    try:
+        ctx_empty = pm_setup.browser.new_context()
+        assert len(ctx_empty.pages) == 0
+
+        # Temporarily create a probe page to discover its authentic CDP browserContextId
+        probe = ctx_empty.new_page()
+        session = ctx_empty.new_cdp_session(probe)
+        info = session.send("Target.getTargetInfo")
+        session.detach()
+        real_empty_id = info["targetInfo"]["browserContextId"]
+        assert real_empty_id
+
+        # Close probe page so ctx_empty is strictly empty again (0 pages)
+        probe.close()
+        assert len(ctx_empty.pages) == 0
+
+        # Connect PageManager with the authentic empty context ID
+        pm_leased = PageManager(
+            ephemeral_cdp_url,
+            test_mode=True,
+            browser=pm_setup.browser,
+            browser_context_id=real_empty_id,
+        ).connect()
+        assert pm_leased.context is ctx_empty
+        assert getattr(pm_leased.context, "_browser_context_id", None) == real_empty_id
+        # The probe page created during connect is retained for subsequent operations
+        assert len(pm_leased.context.pages) >= 1
+        pm_leased.close()
+    finally:
+        pm_setup.close()
+
+
 def test_mcp_server_act_iframe_ref_hover_scroll(ephemeral_cdp_url, fixture_server):
     """Verifies ref-targeted hover and scroll operations inside an iframe return iframe's epoch and revision."""
     server = create_mcp_server(ephemeral_cdp_url, test_mode=True)
@@ -603,7 +652,13 @@ def test_mcp_server_observe_structured_output_is_none(ephemeral_cdp_url, fixture
                 "jsonrpc": "2.0",
                 "id": "00000000-0000-0000-0000-000000000000",
                 "result": {
-                    "resultType": "tool_result",
+                    "resultType": "complete",
+                    "_meta": {
+                        "io.modelcontextprotocol/serverInfo": {
+                            "name": "omnibrowser",
+                            "version": "1.0.0",
+                        }
+                    },
                     "content": [{"type": "text", "text": payload_text}],
                     "isError": False,
                 },

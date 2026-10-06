@@ -75,23 +75,39 @@ class PageManager:
                 if getattr(ctx, "_browser_context_id", None) == self.browser_context_id:
                     self.context = ctx
                     break
-                for p in ctx.pages:
+
+                created_probe = False
+                p = None
+                try:
+                    if ctx.pages:
+                        p = ctx.pages[0]
+                    else:
+                        p = ctx.new_page()
+                        created_probe = True
+
+                    session = ctx.new_cdp_session(p)
                     try:
-                        session = ctx.new_cdp_session(p)
+                        info = session.send("Target.getTargetInfo")
+                        ctx_id = info.get("targetInfo", {}).get("browserContextId")
+                        if ctx_id == self.browser_context_id:
+                            ctx._browser_context_id = self.browser_context_id
+                            self.context = ctx
+                            created_probe = False  # retain page for subsequent operations
+                            break
+                    finally:
                         try:
-                            info = session.send("Target.getTargetInfo")
-                            ctx_id = info.get("targetInfo", {}).get("browserContextId")
-                            if ctx_id == self.browser_context_id:
-                                ctx._browser_context_id = self.browser_context_id
-                                self.context = ctx
-                                break
-                        finally:
-                            try:
-                                session.detach()
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
+                            session.detach()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                finally:
+                    if created_probe and p is not None:
+                        try:
+                            p.close()
+                        except Exception:
+                            pass
+
                 if self.context:
                     break
             if not self.context:

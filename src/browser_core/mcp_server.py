@@ -215,18 +215,25 @@ def _op_observe(worker: BrowserWorker, tab_id: str | None = None, match: str | N
     }
 
     def _wire_size(p: dict) -> int:
-        """Models standard MCP v2 JSON-RPC 2.0 stdio response envelope.
+        """Models standard MCP 2026-07-28 JSON-RPC 2.0 stdio response envelope.
 
         Guarantees Invariant 3 wire-level budget (<= 15,360 bytes / 15 KB)
         accounting for a standard 36-character UUID client request ID,
-        tool result envelope formatting, and JSON text payload.
+        SDK runner _meta serverInfo header, tool result envelope formatting,
+        and JSON text payload.
         """
         raw_text = json.dumps(p, ensure_ascii=False)
         wrapper = {
             "jsonrpc": "2.0",
             "id": "00000000-0000-0000-0000-000000000000",
             "result": {
-                "resultType": "tool_result",
+                "resultType": "complete",
+                "_meta": {
+                    "io.modelcontextprotocol/serverInfo": {
+                        "name": "omnibrowser",
+                        "version": "1.0.0",
+                    }
+                },
                 "content": [{"type": "text", "text": raw_text}],
                 "isError": False,
             },
@@ -234,8 +241,13 @@ def _op_observe(worker: BrowserWorker, tab_id: str | None = None, match: str | N
         return len(json.dumps(wrapper, ensure_ascii=False).encode("utf-8"))
 
     def _is_over_budget(p: dict) -> bool:
+        """Applies Invariant 3 content budget and a 256-byte transport headroom reserve.
+
+        Ensures that variable-length client request IDs and framing metadata
+        cannot breach the 15,360-byte wire limit.
+        """
         encoded = json.dumps(p, ensure_ascii=False).encode("utf-8")
-        return len(encoded) > MAX_OBSERVE_BUDGET_BYTES or _wire_size(p) > 15360
+        return len(encoded) > MAX_OBSERVE_BUDGET_BYTES or _wire_size(p) > (15360 - 256)
 
     # 1. Truncate tree nodes if over budget
     while _is_over_budget(payload) and len(tree_nodes) > 0:
@@ -254,7 +266,7 @@ def _op_observe(worker: BrowserWorker, tab_id: str | None = None, match: str | N
     while _is_over_budget(payload) and len(payload["page_url"]) > 60:
         excess = max(
             len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) - MAX_OBSERVE_BUDGET_BYTES,
-            _wire_size(payload) - 15360,
+            _wire_size(payload) - (15360 - 256),
         )
         cut_len = max(50, len(payload["page_url"]) - excess - 20)
         payload["page_url"] = payload["page_url"][:cut_len] + "...[truncated]"
