@@ -1,7 +1,7 @@
 ---
 name: omnibrowser
 description: >-
-  Automate and control live Chromium browsers via Chrome DevTools Protocol (CDP) on port 17082/9222 using dedicated profiles (~/.chrome-ai-profile) and OmniBrowser's Progressive Capability Pyramid. Use this skill whenever you need to automate web pages, bypass Cloudflare/bot-detection/CAPTCHAs with real user sessions, control authenticated platforms (ChatGPT, Autodesk, AutoCAD Web, Gmail, Google Cloud, VSTEP, Codeforces), execute adaptive fast-path recipes, inspect open tabs, capture screenshots, observe semantic DOM projections, execute atomic actions, download generative images, or consult LLM web interfaces.
+  Automate and control live Chromium browsers via Chrome DevTools Protocol (CDP) on port 17082 using dedicated profiles (~/.chrome-ai-profile) and OmniBrowser's Progressive Capability Pyramid. Use this skill whenever you need to automate web pages, bypass Cloudflare/bot-detection/CAPTCHAs with real user sessions, control authenticated platforms (ChatGPT, Autodesk, AutoCAD Web, Gmail, Google Cloud, VSTEP, Codeforces), execute adaptive fast-path recipes, inspect open tabs, capture screenshots, observe semantic DOM projections, execute atomic actions, download generative images, or consult LLM web interfaces.
 ---
 
 # OmniBrowser: Progressive Capability Browser Automation & Procedural Memory
@@ -26,7 +26,7 @@ OmniBrowser is an open-source, deterministic browser automation engine and proce
 
 ## 1. Environment & Setup
 
-* **Default CDP Port**: `17082` (fallback `9222`)
+* **Standard CDP Port**: `17082`
 * **Dedicated User Profile**: `~/.chrome-ai-profile` (prevents polluting daily user browsing)
 * **Launcher Script**: [launch_chrome.sh](./scripts/launch_chrome.sh)
 * **Main Controller CLI**: [cdp_controller.py](./scripts/cdp_controller.py)
