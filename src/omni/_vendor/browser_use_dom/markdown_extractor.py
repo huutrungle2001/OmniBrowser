@@ -81,4 +81,3 @@ def _preprocess_markdown_content(content: str, max_newlines: int = 3) -> tuple[s
 
 	chars_filtered = original_length - len(content)
 	return content, chars_filtered
-
