@@ -1,0 +1,22 @@
+{
+  "id": "vevox_dismiss_cookie",
+  "name": "Dismiss cookie banner on Vevox",
+  "description": "Click GOT IT on Vevox cookie banner.",
+  "domain_pattern": [
+    "https://vevox.app/*"
+  ],
+  "steps": [
+    {
+      "action": "click",
+      "target": "button:has-text('GOT IT')"
+    }
+  ],
+  "validation": {},
+  "metadata": {
+    "version": "1.0",
+    "success_count": 0,
+    "failure_count": 0,
+    "last_failure_reason": null,
+    "failure_ledger": []
+  }
+}

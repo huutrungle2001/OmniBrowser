@@ -1,0 +1,22 @@
+{
+  "id": "vevox_send_answer",
+  "name": "Send or submit chosen answer on Vevox",
+  "description": "Click send/submit answer button on active Vevox poll.",
+  "domain_pattern": [
+    "https://vevox.app/*"
+  ],
+  "steps": [
+    {
+      "action": "click",
+      "target": "button[data-testid='send-answer-button']"
+    }
+  ],
+  "validation": {},
+  "metadata": {
+    "version": "1.0",
+    "success_count": 1,
+    "failure_count": 0,
+    "last_failure_reason": null,
+    "failure_ledger": []
+  }
+}

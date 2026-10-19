@@ -1,0 +1,22 @@
+{
+  "id": "vevox_select_choice",
+  "name": "Select choice in Vevox Poll",
+  "description": "Select an answer choice in active Vevox poll by text or option prefix.",
+  "domain_pattern": [
+    "https://vevox.app/*"
+  ],
+  "steps": [
+    {
+      "action": "click",
+      "target": "[data-testid='question-choice']:has-text('{{choice}}'), .choiceBox:has-text('{{choice}}'), [data-testid='choice-box']:has-text('{{choice}}'), .v-list-item:has-text('{{choice}}')"
+    }
+  ],
+  "validation": {},
+  "metadata": {
+    "version": "1.0",
+    "success_count": 0,
+    "failure_count": 0,
+    "last_failure_reason": null,
+    "failure_ledger": []
+  }
+}
