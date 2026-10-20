@@ -153,8 +153,8 @@ calls. CLI is independent with per-call connections. Broken transport is dropped
 for a later call; no replay. Shutdown disconnects, not Chrome/user tabs.
 Other clients need agent coordination. Already-running clients may need MCP
 reconnect/new session for changed schemas; no other agent/session was restarted.
-Install the bundled skill by linking `skills/omni` into `~/.codex/skills/omni`.
-See [skills/omni/SKILL.md](skills/omni/SKILL.md). The product name is
+Install the bundled skill by linking `skills/omnibrowser` into `~/.codex/skills/omnibrowser`.
+See [skills/omnibrowser/SKILL.md](skills/omnibrowser/SKILL.md). The product name is
 OmniBrowser; CLI `omni` and MCP registration `omni` remain unchanged.
 
 Each top-level operation is implemented once in `src/omni/commands/*.py`.

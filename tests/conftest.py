@@ -13,7 +13,7 @@ import pytest
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("fixture_server", ROOT / "fixtures/protected_file_server.py")
+spec = importlib.util.spec_from_file_location("fixture_server", ROOT / "tests/fixtures/protected_file_server.py")
 fixture_server = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture_server)
 

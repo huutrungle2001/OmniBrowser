@@ -1,5 +1,5 @@
 ---
-name: omni
+name: omnibrowser
 description: >-
   Read and control an attached local CDP browser through OmniBrowser's Omni MCP or CLI, including
   paged observation, native input, PNG screenshots, scrolling and HTTP downloads.
