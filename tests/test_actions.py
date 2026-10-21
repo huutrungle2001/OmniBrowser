@@ -6,14 +6,14 @@ def test_separate_process_fill_click_and_mutation(cli, page):
     browser_page, tab = page
     controls = refs(cli, tab)
     browser_page.evaluate("document.body.appendChild(document.createElement('button')).textContent='Unrelated'")
-    count = browser_page.evaluate("window.__omni_v1_document__.next")
+    count = browser_page.evaluate("window.__omni_document__.next")
     filled = cli("--act", "--tab", tab, "--ref", controls["Search label"], "--action", "fill", "--value", "SECRET_FILL")
     assert "SECRET_FILL" not in filled.stdout
     assert browser_page.locator("#query").input_value() == "SECRET_FILL"
     cli("--act", "--tab", tab, "--ref", controls["Submit"], "--action", "click")
     assert browser_page.locator("#result").inner_text() == "Submitted"
     assert browser_page.locator("#submit").get_attribute("data-clicks") == "1"
-    assert browser_page.evaluate("window.__omni_v1_document__.next") == count  # no hidden observe
+    assert browser_page.evaluate("window.__omni_document__.next") == count  # no hidden observe
     cli("--act", "--tab", tab, "--ref", controls["Shadow field"], "--action", "fill", "--value", "shadow")
     assert browser_page.locator("#inside").input_value() == "shadow"
     cli("--act", "--tab", tab, "--ref", controls["Shadow button"], "--action", "click")

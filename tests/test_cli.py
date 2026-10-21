@@ -94,10 +94,10 @@ def test_wheel_contents(tmp_path, chrome, page):
     assert result.returncode == 0, result.stdout + result.stderr
     wheel = next(tmp_path.glob("*.whl"))
     with zipfile.ZipFile(wheel) as archive:
-        assert "omni/scanner.js" in archive.namelist()
+        assert "omni/browser/refs.js" in archive.namelist()
         entries = archive.read("omni_cli-1.0.0.dist-info/entry_points.txt").decode()
         assert "omni = omni.cli:main" in entries
-    # Execute a non-editable wheel outside the checkout, including packaged scanner.
+    # Execute a non-editable wheel outside the checkout, including packaged refs.
     environment = tmp_path / "wheel-env"
     subprocess.run([sys.executable, "-m", "venv", str(environment)], check=True)
     installed = subprocess.run([str(environment / "bin/python"), "-m", "pip", "install", "--disable-pip-version-check", str(wheel)],

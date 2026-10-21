@@ -1,5 +1,5 @@
 """Exact tab resolution helpers; operations live under commands/."""
-from .errors import OmniError
+from ..errors import OmniError
 
 
 def target_id(page):
@@ -20,11 +20,3 @@ def resolve(browser, tab_id):
             except Error:
                 continue  # A closing tab must not select a different one.
     raise OmniError("TAB_NOT_FOUND", "The selected tab does not exist.", 3)
-
-# Compatibility for existing callers.
-from .commands.list_tabs import list_tabs
-
-
-def navigate(page, url, timeout):
-    from .commands.goto import navigate as command
-    return command(page, url, timeout)

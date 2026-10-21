@@ -1,9 +1,10 @@
 import argparse
+import math
 import os
 import sys
 
 from . import __version__
-from .cdp import connect, endpoint, http_url
+from .browser.connection import connect, endpoint, http_url
 from .errors import OmniError, invalid
 from .models import serialize
 
@@ -31,7 +32,9 @@ def parser():
     p.add_argument("--tab")
     p.add_argument("--new-tab", action="store_true")
     p.add_argument("--ref")
-    p.add_argument("--action", choices=("click", "fill", "press", "select"))
+    p.add_argument("--action", choices=("click", "fill", "press", "select", "click_at"))
+    p.add_argument("--x", type=float, help="Top-level viewport CSS x for click_at")
+    p.add_argument("--y", type=float, help="Top-level viewport CSS y for click_at")
     p.add_argument("--value")
     p.add_argument("--key")
     p.add_argument("--label")
@@ -57,7 +60,14 @@ def validate(a, mcp=False):
         raise invalid("--list-tabs does not accept --tab.")
     if a.goto is not None:
         http_url(a.goto)
-    if a.act:
+    if a.act and a.action == 'click_at':
+        if any(v is not None for v in (a.ref, a.value, a.label, a.key)):
+            raise invalid('click_at rejects ref, value, label and key.')
+        if a.x is None or a.y is None or not all(math.isfinite(v) for v in (a.x, a.y)):
+            raise invalid('click_at requires finite numeric x and y in viewport CSS pixels.')
+    elif a.act:
+        if a.x is not None or a.y is not None:
+            raise invalid('Coordinates are only valid for click_at.')
         if not a.ref or not a.action:
             raise invalid("--act requires --ref and --action.")
         if a.action == "fill" and a.value is None or a.action not in {"fill", "select"} and a.value is not None:
@@ -68,7 +78,7 @@ def validate(a, mcp=False):
             raise invalid("select requires exactly one of --value or --label.")
         if a.action != "select" and a.label is not None:
             raise invalid("--label is only valid for select.")
-    elif any(v is not None for v in (a.ref, a.action, a.value, a.key, a.label)):
+    elif any(v is not None for v in (a.ref, a.action, a.value, a.key, a.label, a.x, a.y)):
         raise invalid("Action options require --act.")
     if a.download:
         if not a.url or not a.output:
@@ -117,7 +127,7 @@ def validate(a, mcp=False):
 
 def dispatch(a, browser, include_images=False):
     """Shared operation body; connection lifetime belongs to CLI or MCP caller."""
-    from .tabs import resolve
+    from .browser.tabs import resolve
     from .commands.goto import navigate
     if a.new_tab:
         page = browser.contexts[0].new_page()
@@ -130,7 +140,7 @@ def dispatch(a, browser, include_images=False):
         return observe(page, a.tab, a.max_bytes, a.pretty, a.timeout, a.cursor)
     if a.act:
         from .commands.act import act
-        return act(page, a.tab, a.ref, a.action, a.value, a.timeout, a.key, a.label)
+        return act(page, a.tab, a.ref, a.action, a.value, a.timeout, a.key, a.label, a.x, a.y)
     if a.download:
         from .commands.download import download
         return download(page.context, a.url, a.output, a.timeout, a.max_bytes, a.mkdir, a.overwrite)

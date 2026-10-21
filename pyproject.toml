@@ -20,7 +20,7 @@ omni-mcp = "omni.mcp_server:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-omni = ["scanner.js", "refs.js"]
+"omni.browser" = ["refs.js"]
 "omni._vendor.browser_use_dom" = ["LICENSE", "UPSTREAM.md"]
 
 [tool.pytest.ini_options]

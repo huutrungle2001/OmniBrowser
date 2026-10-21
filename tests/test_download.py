@@ -92,7 +92,7 @@ def test_cookie_scoping_and_cross_origin_redirect(cli, page, server, tmp_path):
 
 
 def test_host_only_cookie_not_broadened_to_subdomain():
-    from omni.download import cookie_jar
+    from omni.commands.download import cookie_jar
     from urllib.request import Request
     jar = cookie_jar([{"name": "s", "value": "secret", "domain": "example.test", "path": "/", "secure": False}])
     request = Request("https://sub.example.test/file")

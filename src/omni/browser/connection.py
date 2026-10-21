@@ -2,7 +2,7 @@ from contextlib import contextmanager
 import ipaddress
 from urllib.parse import urlsplit
 
-from .errors import OmniError, invalid
+from ..errors import OmniError, invalid
 
 
 def http_url(value):

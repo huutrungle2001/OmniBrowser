@@ -66,7 +66,8 @@ def screenshot(page, tab_id, output=None, full_page=False, mkdir=False, overwrit
         width, height = math.ceil(bounds['width']), math.ceil(bounds['height'])
         if width <= 0 or height <= 0 or max(width, height) > MAX_SIDE or width * height > MAX_PIXELS:
             raise OmniError('SCREENSHOT_LIMIT', 'Capture exceeds 8192px per side or 6000000 pixels; use viewport capture.', 2)
-        dpr = page.evaluate('() => window.devicePixelRatio || 1')
+        metrics = page.evaluate('() => ({dpr: devicePixelRatio || 1, scroll: {x: scrollX, y: scrollY}})')
+        dpr = metrics['dpr']
         response = session.send('Page.captureScreenshot', {
             'format': 'png', 'fromSurface': True, 'captureBeyondViewport': full_page,
             'clip': {**bounds, 'scale': 1 / dpr},
@@ -80,11 +81,29 @@ def screenshot(page, tab_id, output=None, full_page=False, mkdir=False, overwrit
         width, height = struct.unpack('>II', png[16:24])
         if len(png) > MAX_BYTES or width * height > MAX_PIXELS or max(width, height) > MAX_SIDE:
             raise OmniError('SCREENSHOT_LIMIT', 'Actual PNG exceeds the image size limits.', 2)
+        after = session.send('Page.getLayoutMetrics')
+        if any(after[k] != layout[k] for k in ('cssVisualViewport', 'cssLayoutViewport', 'cssContentSize')):
+            raise OmniError('SCREENSHOT', 'Viewport or page extent changed during capture; capture again.', 4)
+        normal = view.get('scale', 1) == 1 and not view.get('offsetX', 0) and not view.get('offsetY', 0)
+        mapping = {
+            'supported': bool(normal and not full_page),
+            'input_space': 'top-level viewport', 'input_unit': 'CSS pixels',
+            'css_per_image_pixel': {'x': bounds['width'] / width, 'y': bounds['height'] / height},
+            'viewport_origin': {'x': bounds['x'] - view['pageX'], 'y': bounds['y'] - view['pageY']},
+            'reason': ('Full-page image positions are not viewport input coordinates; use a viewport screenshot.' if full_page else
+                       None if normal else 'Non-default visual viewport scaling/offset is unsupported for click_at.'),
+        }
         if path is not None:
             publish(path, png, mkdir, overwrite)
         return ScreenshotResult({'ok': True, 'tab_id': tab_id, 'url': page.url,
                                  'path': str(path) if path else None, 'format': 'png',
-                                 'width': width, 'height': height, 'bytes': len(png), 'full_page': full_page}, png)
+                                 'width': width, 'height': height, 'bytes': len(png), 'full_page': full_page,
+                                 'viewport': {'width': view['clientWidth'], 'height': view['clientHeight']},
+                                 'capture': {'space': 'page CSS pixels', **bounds},
+                                 'page_scroll': metrics['scroll'],
+                                 'visual_viewport_offset': {'x': view.get('offsetX', 0), 'y': view.get('offsetY', 0)},
+                                 'device_pixel_ratio': dpr, 'browser_zoom': view.get('zoom'),
+                                 'visual_viewport_scale': view.get('scale', 1), 'image_to_input': mapping}, png)
     except Error:
         raise OmniError('SCREENSHOT', 'Capture failed; inspect the selected tab.', 4) from None
     finally:

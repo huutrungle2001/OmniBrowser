@@ -1,13 +1,13 @@
 // Exact backend-node bridge only: extraction belongs to the vendored reader.
-({tabId}) => {
-  const key = '__omni_v1_document__';
+({tabId, frameId}) => {
+  const key = '__omni_document__';
   let state = window[key];
-  if (!state || state.bridge !== 2 || state.document !== document ||
+  if (!state || state.document !== document || state.frameId !== frameId ||
       state.tabId !== tabId || !state.live) {
     if (state) { state.live = false; state.observer?.disconnect(); }
     const id = Array.from(crypto.getRandomValues(new Uint8Array(16)),
       byte => byte.toString(16).padStart(2, '0')).join('');
-    state = {bridge: 2, document, tabId, live: true, id, next: 0,
+    state = {document, tabId, frameId, live: true, id, next: 0,
       nodes: new Map(), refs: new WeakMap(), roots: new WeakSet()};
     state.identity = el => JSON.stringify([el.localName, el.getAttribute('role'),
       el.getAttribute('type'), el.getAttribute('href'), el.href?.baseVal || el.href,
@@ -24,6 +24,9 @@
       }
     };
     state.observer = new MutationObserver(records => {
+      // Attribute/character-data churn is not itself ref invalidation. The
+      // current identity check below decides whether a tracked node changed;
+      // removal records still protect exact-node and remove/reinsert semantics.
       // Only walk tracked refs (<=512), not a potentially enormous removed tree.
       const removed = records.flatMap(record => Array.from(record.removedNodes));
       for (const [ref, entry] of state.nodes) {
@@ -37,8 +40,7 @@
     });
     state.watch = root => {
       if (!state.roots.has(root)) {
-        state.observer.observe(root, {subtree: true, childList: true, attributes: true,
-          attributeFilter: ['href', 'role', 'type', 'id', 'name', 'formaction', 'action', 'contenteditable']});
+        state.observer.observe(root, {subtree: true, childList: true, attributes: true, characterData: true});
         state.roots.add(root);
       }
     };
@@ -47,7 +49,7 @@
       if (!state.live || state.id !== docId || state.document !== document ||
           !node || node.nodeType !== 1 || !node.isConnected || node.ownerDocument !== document ||
           node.baseURI !== baseURI) return null;
-      // Never traverse an iframe or closed root, even if CDP can resolve it.
+      // Only bind nodes in this document and authored open shadow roots.
       for (let root = node.getRootNode(); root !== document; root = root.host?.getRootNode()) {
         if (!(root instanceof ShadowRoot) || root.mode !== 'open') return null;
         state.watch(root);
@@ -57,9 +59,15 @@
       }
       const identity = state.identity(node);
       let ref = state.refs.get(node);
-      if (!ref || !state.nodes.has(ref)) {
+      const entry = ref && state.nodes.get(ref);
+      if (!entry || entry.node !== node || entry.backendId !== backendId ||
+          state.identity(node) !== entry.identity) {
+        if (entry) state.drop(ref);
+        ref = null;
+      }
+      if (!ref) {
         while (state.nodes.size >= 512) state.drop(state.nodes.keys().next().value);
-        ref = `${state.id}.n${++state.next}`;
+        ref = `${state.frameId}.${state.id}.n${++state.next}`;
         state.nodes.set(ref, {node, identity, backendId});
         state.refs.set(node, ref);
       }

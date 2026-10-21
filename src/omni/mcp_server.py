@@ -13,7 +13,7 @@ from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
 from . import __version__
-from .cdp import connect
+from .browser.connection import connect
 from .cli import dispatch, failure, parser, run, validate
 from .commands.screenshot import ScreenshotResult
 from .errors import invalid
@@ -43,24 +43,26 @@ TOOLS = [
                    {'required': ['tab_id'], 'properties': {'new_tab': {'const': False}}},
                    {'required': ['new_tab'], 'properties': {'new_tab': {'const': True}}, 'not': {'required': ['tab_id']}},
                ])),
-    types.Tool(name='observe', description='Clean content, links and controls with exact refs; continue all streams using next_cursor. No field values.',
+    types.Tool(name='observe', description='Frame-aware clean content, links, controls and frame coverage. Exact document/node refs; continue all four streams using next_cursor. No field values.',
                inputSchema=schema({'tab_id': TAB, 'cursor': {'type': 'string', 'minLength': 1, 'maxLength': 512},
                                    'max_bytes': {'type': 'integer', 'minimum': 2048, 'maximum': 65536, 'default': 15360}, 'timeout': TIMEOUT}, ('tab_id',))),
-    types.Tool(name='act', description='Native click/fill/press/select on an exact observed ref. No replay or hidden observe. select is native HTML only.',
+    types.Tool(name='act', description='Native ref click/fill/press/select in its exact frame, or click_at(x,y) in top-level viewport CSS pixels. No replay/hidden observe.',
                inputSchema=schema({'tab_id': TAB, 'ref': {'type': 'string', 'minLength': 1},
-                                   'action': {'type': 'string', 'enum': ['click', 'fill', 'press', 'select']},
+                                   'action': {'type': 'string', 'enum': ['click', 'fill', 'press', 'select', 'click_at']},
+                                   'x': {'type': 'number'}, 'y': {'type': 'number'},
                                    'value': TEXT, 'label': TEXT, 'key': {'type': 'string', 'minLength': 1}, 'timeout': TIMEOUT},
-                                  ('tab_id', 'ref', 'action'), oneOf=[
-                    action_variant('click', forbidden=('value', 'label', 'key')),
-                    action_variant('fill', ('value',), ('label', 'key')),
-                    action_variant('press', ('key',), ('value', 'label')),
-                    action_variant('select', ('value',), ('label', 'key')),
-                    action_variant('select', ('label',), ('value', 'key')),
+                                  ('tab_id', 'action'), oneOf=[
+                    action_variant('click', ('ref',), ('value', 'label', 'key', 'x', 'y')),
+                    action_variant('fill', ('ref', 'value'), ('label', 'key', 'x', 'y')),
+                    action_variant('press', ('ref', 'key'), ('value', 'label', 'x', 'y')),
+                    action_variant('select', ('ref', 'value'), ('label', 'key', 'x', 'y')),
+                    action_variant('select', ('ref', 'label'), ('value', 'key', 'x', 'y')),
+                    action_variant('click_at', ('x', 'y'), ('ref', 'value', 'label', 'key')),
                ])),
     types.Tool(name='download', description='Cookie-scoped HTTP GET streaming; atomic output, no Save dialog. No POST/blob/challenge fallback.',
                inputSchema=schema({'tab_id': TAB, 'url': URL, **FILE_OPTIONS,
                                    'max_bytes': {'type': 'integer', 'minimum': 1, 'default': 536870912}, 'timeout': TIMEOUT}, ('tab_id', 'url', 'output'))),
-    types.Tool(name='screenshot', description='Return actual PNG ImageContent and metadata; optional safe output file. No focus/resize/scroll. Max 6M pixels, 8192px/side, 4 MiB.',
+    types.Tool(name='screenshot', description='PNG ImageContent with viewport CSS/image mapping metadata; optional safe file. Use viewport capture for click_at, not full-page positions. No focus/resize/scroll. Max 6M pixels, 8192px/side, 4 MiB.',
                inputSchema=schema({'tab_id': TAB, **FILE_OPTIONS, 'full_page': {'type': 'boolean', 'default': False}, 'timeout': TIMEOUT}, ('tab_id',))),
     types.Tool(name='scroll', description='One main-document native wheel input. CSS pixels; reports before/after movement, not lazy-load completeness. Inner panes unsupported.',
                inputSchema=schema({'tab_id': TAB, 'direction': {'type': 'string', 'enum': ['up', 'down']},
@@ -140,7 +142,8 @@ server = Server('omni', version=__version__, lifespan=lifespan, instructions=(
     'Use explicit tab IDs and observed refs. Follow observe next_cursor while has_more; '
     'STALE_CURSOR needs a fresh observe. STALE_REF needs observe/new target. '
     'Never automatically replay mutations after failure/timeout/cancellation. '
-    'Main/open Shadow DOM only; screenshots may show sensitive page content. '
+    'Frame-aware refs; check unread/limited frame coverage. Screenshots may show sensitive content. '
+    'click_at uses viewport CSS pixels, not full-page image positions; account for image scaling. '
     'Scroll is one wheel input, not a claim of lazy-load completeness. Coordinate shared tabs.'
 ))
 

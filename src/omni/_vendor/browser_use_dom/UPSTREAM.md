@@ -26,15 +26,27 @@ content. PaintOrderRemover's algorithm is retained; Omni supplies a flat bounded
 list of visible nodes (max 3000) instead of a recursive framework tree. No event
 listener probing per DOM node: the adapter uses batch snapshot isClickable.
 
-`omni/reader.py`, `omni/observe.py` and `omni/refs.js` are local glue, not upstream
-source: main/open-shadow filtering, sanitized HTML -> upstream markdown conversion,
+`omni/reading/`, `omni/commands/observe.py` and `omni/browser/targets.py`/`refs.js`
+are local glue, not upstream source: per-document/open-shadow filtering, sanitized HTML -> upstream markdown conversion,
 bounded compact output, and exact backend-ID -> resolved-node -> document Map.
 The node cap is 50000, content HTML cap 1000000 characters, ref binding cap 96 per
 response and retained map cap 512. Candidate discovery is no longer globally
-capped at 96: local `pagination.py` continues all three streams by signed cursor.
+capped at 96: `reading/pagination.py` continues content, links, controls and frame
+metadata by a signed, topology/document-generation-bound cursor.
 Omni command implementations now live under `omni/commands/`; vendor code and
 MIT notices remain intact. Omissions/limited processing are reported.
 Native actions/download code is Omni's existing implementation, not vendored.
+
+2026-10-21 frame revision: studied the same current upstream commit's
+`browser_use/browser/session.py:get_all_frames` and `browser_use/dom/service.py`
+(`_get_all_trees`, `_get_ax_tree_for_all_frames`, `get_dom_tree`).
+`omni/browser/frames.py` adapts only the target-local Page.getFrameTree walk,
+parentId preservation for OOPIF roots, per-target session routing, visited-frame
+deduplication and bounded nesting. Capture batches DOM/snapshot per renderer
+target and requests AX per frame, joining backend IDs only in that document/session.
+Omni uses public Playwright CDP sessions and default-context auxData.frameId, not
+upstream session managers, URL-matching fallback, focus state or framework.
+The upstream MIT copyright/license above applies to adapted traversal logic.
 
 Runtime additions: markdownify for the copied conversion functions; the standard
 MCP Python SDK is used separately for transport. No browser-use framework, LLM,

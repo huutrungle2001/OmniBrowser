@@ -23,13 +23,13 @@ def test_controls_shadow_dialog_secrets(cli, page, server):
                  "Choice", "Offscreen", "Shadow field", "Shadow button", "Accept cookies"):
         assert name in names
     assert names["Disabled"]["disabled"] and names["ARIA disabled"]["disabled"]
-    for name in ("Hidden button", "Inert button", "Invisible button", "Frame-only control", "Download PDF"):
+    for name in ("Hidden button", "Inert button", "Invisible button", "Download PDF"):
         assert name not in names
     assert "PRIVATE_" not in result.stdout
     assert "Shadow content" in data["content"] and "Cookie consent" in data["content"]
     link = next(l for l in data["links"] if l["text"] == "Download PDF")
     assert link["href"] == server.url + "/protected/file.pdf" and link["download_hint"]
-    assert data["coverage"]["unsupported_frames"] == 1
+    assert data["coverage"]["frames_read"] == 2
     again = cli("--observe", "--tab", tab).data
     assert [c["ref"] for c in again["controls"]] == [c["ref"] for c in data["controls"]]
 
@@ -49,13 +49,20 @@ def test_budget(cli, page, server, size, pretty):
 
 
 def test_truncate_content_first():
-    from omni.observe import budget
+    from omni.reading.pagination import paginate
     result = {"tab_id": "a", "url": "http://localhost", "title": "T", "content": "測試" * 2000,
               "links": [{"ref": "d.n1", "text": "Link", "href": "http://localhost"}],
               "controls": [{"ref": "d.n2", "role": "button", "name": "Keep me", "disabled": False}],
               "truncated": False, "coverage": {"content_truncated": False, "links_omitted": 0,
-              "controls_omitted": 0, "unsupported_frames": 0}}
-    output = budget(result, 2048)
+              "controls_omitted": 0, "frames_unread": 0}}
+    result['frames'] = [{'frame_id': 'a' * 32}]
+    result['coverage'].update(processing_limited=False, frames_unread=0)
+    candidates = [(1, {}, 'links', {k: v for k, v in result['links'][0].items() if k != 'ref'}),
+                  (2, {}, 'controls', {k: v for k, v in result['controls'][0].items() if k != 'ref'})]
+    for candidate in candidates:
+        candidate[3]['frame_id'] = 'a' * 32
+    metadata = {'id': 'b' * 32, 'documents': [], 'url': result['url'], 'cursor_key': 'ab' * 32}
+    output, _ = paginate(result, candidates, metadata, 'a', 2048, False)
     assert output["content"] and output["links"] and output["controls"]
     assert output["coverage"]["links_omitted"] == output["coverage"]["controls_omitted"] == 0
 

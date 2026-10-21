@@ -1,5 +1,5 @@
 from ..errors import OmniError
-from ..tabs import target_id
+from ..browser.tabs import target_id
 
 def navigate(page, url, timeout):
     from playwright.sync_api import Error, TimeoutError

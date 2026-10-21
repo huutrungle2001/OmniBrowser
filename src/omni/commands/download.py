@@ -10,7 +10,7 @@ from urllib.request import Request
 
 import httpx
 
-from ..cdp import http_url
+from ..browser.connection import http_url
 from ..errors import OmniError
 
 

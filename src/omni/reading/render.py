@@ -3,14 +3,14 @@ from html import escape
 import re
 from urllib.parse import urljoin, urlsplit
 
-from ._vendor.browser_use_dom.clickable_elements import ClickableElementDetector
-from ._vendor.browser_use_dom.enhanced_snapshot import build_snapshot_lookup
-from ._vendor.browser_use_dom.markdown_extractor import convert_html_to_markdown
-from ._vendor.browser_use_dom.paint_order import PaintOrderRemover
-from ._vendor.browser_use_dom.views import (
+from .._vendor.browser_use_dom.clickable_elements import ClickableElementDetector
+from .._vendor.browser_use_dom.enhanced_snapshot import build_snapshot_lookup
+from .._vendor.browser_use_dom.markdown_extractor import convert_html_to_markdown
+from .._vendor.browser_use_dom.paint_order import PaintOrderRemover
+from .._vendor.browser_use_dom.views import (
     EnhancedAXNode, EnhancedAXProperty, EnhancedDOMTreeNode, SimplifiedNode,
 )
-from ._vendor.browser_use_dom.visibility import is_visible
+from .._vendor.browser_use_dom.visibility import is_visible
 
 NODE_LIMIT = 50000
 PAINT_LIMIT = 3000
@@ -35,7 +35,7 @@ def editable(node):
             node.attributes.get('contenteditable', 'false').lower() not in {'false', 'inherit'})
 
 
-def compact_tree(dom, ax, snapshot):
+def compact_tree(dom, ax, snapshot, limits):
     """Use DOM backend IDs as the only join key. Never reconstruct a selector."""
     layouts = build_snapshot_lookup(snapshot)
     ax_lookup = {}
@@ -53,11 +53,11 @@ def compact_tree(dom, ax, snapshot):
             )
     nodes, visible, blocked = [], {}, {}
     coverage = {'content_truncated': False, 'links_omitted': 0, 'controls_omitted': 0,
-                'unsupported_frames': 0, 'unsupported_closed_shadow_roots': 0,
+                'unsupported_closed_shadow_roots': 0,
                 'processing_limited': False, 'paint_filter_limited': False,
                 'ref_binding_limit': REF_LIMIT, 'ref_bindings_failed': 0}
     pending = [(dom, None, False, False)]
-    while pending and len(nodes) < NODE_LIMIT:
+    while pending and len(nodes) < limits['nodes']:
         raw, parent, ancestor_hidden, ancestor_editable = pending.pop()
         attrs = dict(zip(raw.get('attributes', [])[::2], raw.get('attributes', [])[1::2]))
         # DOM attributes can contain secrets; drop values and unrelated data immediately.
@@ -86,7 +86,6 @@ def compact_tree(dom, ax, snapshot):
         if raw['nodeType'] == 3 and not hidden and not field:
             node.node_value = raw.get('nodeValue', '')
         if node.tag_name in {'iframe', 'frame'}:
-            coverage['unsupported_frames'] += 1
             continue
         children = list(raw.get('children', []))
         for shadow in raw.get('shadowRoots', []):
@@ -101,8 +100,10 @@ def compact_tree(dom, ax, snapshot):
     # Use the upstream paint-order grouping/rectangle union, but bound its input.
     paintable = [SimplifiedNode(n) for n in nodes if visible[n.backend_node_id]
                  and n.snapshot_node.paint_order is not None]
-    coverage['paint_filter_limited'] = len(paintable) > PAINT_LIMIT
-    paintable = paintable[:PAINT_LIMIT]
+    coverage['paint_filter_limited'] = len(paintable) > limits['paint']
+    paintable = paintable[:limits['paint']]
+    limits['paint'] -= len(paintable)
+    limits['nodes'] -= len(nodes)
     if nodes:
         root = SimplifiedNode(nodes[0], paintable)
         PaintOrderRemover(root).calculate_paint_order()
@@ -112,8 +113,8 @@ def compact_tree(dom, ax, snapshot):
     return nodes, visible, blocked, coverage
 
 
-def render_observation(dom, ax, snapshot, metadata, tab_id):
-    nodes, visible, blocked, coverage = compact_tree(dom, ax, snapshot)
+def render_observation(dom, ax, snapshot, metadata, tab_id, limits):
+    nodes, visible, blocked, coverage = compact_tree(dom, ax, snapshot, limits)
     texts = {}
     for node in reversed(nodes):
         if blocked[node.backend_node_id] or node.tag_name in SKIP:
@@ -201,10 +202,11 @@ def render_observation(dom, ax, snapshot, metadata, tab_id):
                 stack.append((EnhancedDOMTreeNode(0, 1, output_tag), True))
             stack.extend((child, False) for child in reversed(node.children))
         length += len(fragment)
-        if length > CONTENT_LIMIT:
+        if length > limits['content']:
             coverage['content_truncated'] = True
             break
         chunks.append(fragment)
+    limits['content'] = max(0, limits['content'] - length)
     content, _, _ = convert_html_to_markdown(''.join(chunks))
     result = {'tab_id': tab_id, 'url': metadata['url'], 'title': metadata['title'],
               'content': content, 'links': [], 'controls': [], 'coverage': coverage,
