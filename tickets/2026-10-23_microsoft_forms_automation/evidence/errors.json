@@ -1,0 +1,58 @@
+{
+  "unsupported_scroll": {
+    "command": "omni --scroll --tab F7B26F7BC7838C13CA35CE563F713950 --direction down --amount 1500",
+    "response": {
+      "ok": false,
+      "error": {
+        "code": "UNSUPPORTED_SCROLL",
+        "message": "No unobstructed main-document wheel target; inner panes/iframes are unsupported."
+      }
+    }
+  },
+  "stale_ref": {
+    "command": "omni --act --tab F7B26F7BC7838C13CA35CE563F713950 --ref F7B26F7BC7838C13CA35CE563F713950.d78531a950d0e360eb5a60efd23e4993.n233 --action click",
+    "response": {
+      "ok": false,
+      "error": {
+        "code": "STALE_REF",
+        "message": "Run --observe again before acting."
+      }
+    }
+  },
+  "action_timeout": {
+    "command": "omni --act --tab F7B26F7BC7838C13CA35CE563F713950 --ref F7B26F7BC7838C13CA35CE563F713950.d78531a950d0e360eb5a60efd23e4993.n222 --action click",
+    "response": {
+      "ok": false,
+      "error": {
+        "code": "TIMEOUT",
+        "message": "Action timed out; inspect before retrying. It was not replayed."
+      }
+    }
+  },
+  "clamped_full_page_screenshot": {
+    "command": "omni --screenshot --tab F7B26F7BC7838C13CA35CE563F713950 --full-page",
+    "response": {
+      "ok": true,
+      "format": "png",
+      "width": 1352,
+      "height": 756,
+      "bytes": 203346,
+      "full_page": true,
+      "viewport": {
+        "width": 1352,
+        "height": 756
+      },
+      "capture": {
+        "space": "page CSS pixels",
+        "x": 0,
+        "y": 0,
+        "width": 1352,
+        "height": 756
+      },
+      "image_to_input": {
+        "supported": false,
+        "reason": "Full-page image positions are not viewport input coordinates; use a viewport screenshot."
+      }
+    }
+  }
+}
