@@ -1,0 +1,25 @@
+{
+  "name": "omnibrowser",
+  "version": "3.0.0",
+  "description": "OmniBrowser v3: Ultra-lightweight Raw CDP browser automation",
+  "type": "module",
+  "main": "dist/cli.js",
+  "bin": {
+    "omni": "./dist/cli.js",
+    "omni-mcp": "./dist/mcp.js"
+  },
+  "scripts": {
+    "build": "tsup",
+    "start": "node dist/cli.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.14",
+    "tsup": "^8.4.0",
+    "typescript": "^5.7.0"
+  }
+}

@@ -6,7 +6,7 @@ description: >-
   scrolling and screenshots. Bypasses login/MFA by reusing the existing signed-in Chrome session.
 ---
 
-Prefer registered MCP `omni_v3` or the global CLI `omni_v3` (available globally in PATH).
+Prefer registered MCP `omni` or the global CLI `omni` (available globally in PATH).
 Default CDP: `http://127.0.0.1:17082` (Port 17082, Host 127.0.0.1).
 
 Eight tools available:
@@ -30,8 +30,9 @@ Eight tools available:
   - Captures viewport, full page, or specific element to PNG.
 
 CLI Examples:
-- `omni_v3 --list-tabs`
-- `omni_v3 --tab <TAB_ID> --eval 'document.title'`
-- `omni_v3 --tab <TAB_ID> --selector '#form' --observe`
-- `omni_v3 --tab <TAB_ID> --ref r1 --act click`
-- `omni_v3 --tab <TAB_ID> --act-batch '[{"ref":"r1","action":"fill","value":"text"},{"ref":"r2","action":"click"}]'`
+- `omni --list-tabs`
+- `omni --tab <TAB_ID> --eval 'document.title'`
+- `omni --tab <TAB_ID> --selector '#form' --observe`
+- `omni --tab <TAB_ID> --ref r1 --act click`
+- `omni --tab <TAB_ID> --act-batch '[{"ref":"r1","action":"fill","value":"text"},{"ref":"r2","action":"click"}]'`
+
