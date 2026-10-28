@@ -15,8 +15,7 @@
   },
   "scripts": {
     "build": "tsup",
-    "start": "node dist/cli.js",
-    "test": "node --test"
+    "start": "node dist/cli.js"
   },
   "dependencies": {
     "ws": "^8.18.0"
