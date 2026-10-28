@@ -61,6 +61,10 @@ node dist/cli.js --act-batch '[{"ref":"r1","action":"fill","value":"Bob"},{"ref"
 # Evaluate arbitrary JS in tab context
 node dist/cli.js --eval "document.title"
 
+# In-session HTTP request directly inside tab context (inherits ambient cookies & tokens; bypasses CORS)
+node dist/cli.js --fetch "/api/v1/profile"
+node dist/cli.js --fetch "/api/v1/items" --method POST --body '{"limit":20}'
+
 # Container-aware scrolling
 node dist/cli.js --scroll --selector "#inner-scroll" --direction down --amount 200
 
@@ -75,7 +79,7 @@ Add to your Claude / Codex MCP config:
   "mcpServers": {
     "omnibrowser": {
       "command": "node",
-      "args": ["/Users/huutrungle2001/Documents/OnGoing/OmniBrowser/dist/mcp.js"],
+      "args": ["/path/to/OmniBrowser/dist/mcp.js"],
       "env": {
         "CDP_PORT": "17082"
       }
@@ -83,4 +87,18 @@ Add to your Claude / Codex MCP config:
   }
 }
 ```
+
+### Gemini / ChatGPT image-mode scripts
+
+Open image mode, prepare a prompt, and optionally send it through the signed-in
+web UI using the existing OmniBrowser SDK:
+
+```sh
+node scripts/gemini-image.mjs --prompt-file /absolute/path/to/prompt.txt
+node scripts/chatgpt-image.mjs --prompt-file /absolute/path/to/prompt.txt --send
+```
+
+Without `--send`, prompts remain drafts. See
+[image-chat-scripts.md](docs/image-chat-scripts.md) for safety guards, JSON output,
+tab reuse, tests and limitations.
 

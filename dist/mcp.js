@@ -3,7 +3,7 @@ import {
   Browser,
   observe,
   screenshot
-} from "./chunk-ZR5WML4E.js";
+} from "./chunk-FN6CJW7Z.js";
 
 // src/mcp.ts
 import readline from "readline";
@@ -20,6 +20,7 @@ var TOOLS = [
   tool("observe", "Extract clean page text, controls with refs, and links", { tab_id: str(), selector: str(), max_chars: num() }),
   tool("act", "Perform smart action (click, fill, select, check, press)", { tab_id: str(), ref: str(), selector: str(), action: str(), value: str(), snapshot_id: str() }, ["action"]),
   tool("act_batch", "Execute multiple actions sequentially in 1 turn", { tab_id: str(), snapshot_id: str(), actions: { type: "array" }, stop_on_error: { type: "boolean" } }, ["actions"]),
+  tool("fetch", "In-session HTTP request directly inside tab context (inherits origin cookies, CSRF, auth tokens; bypasses CORS)", { tab_id: str(), url: str(), method: str(), headers: { type: "object" }, body: {} }, ["url"]),
   tool("evaluate", "Evaluate JavaScript in page context", { tab_id: str(), expression: str() }, ["expression"]),
   tool("scroll", "Scroll page or container element", { tab_id: str(), ref: str(), selector: str(), direction: str(), amount: num() }),
   tool("screenshot", "Capture screenshot of viewport, full page, or element", { tab_id: str(), selector: str(), full_page: { type: "boolean" }, path: str() })
@@ -46,6 +47,8 @@ async function handleToolCall(name, args) {
       return page.act({ action: args.action, ref: args.ref, selector: args.selector, value: args.value }, { snapshotId: args.snapshot_id });
     case "act_batch":
       return page.actBatch(args.actions, { snapshotId: args.snapshot_id, stopOnError: args.stop_on_error });
+    case "fetch":
+      return page.fetch(args.url, { method: args.method, headers: args.headers, body: args.body });
     case "evaluate":
       return { ok: true, value: await page.evaluate(args.expression) };
     case "scroll":

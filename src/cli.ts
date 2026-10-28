@@ -24,6 +24,14 @@ async function main() {
     const page = await browser.getPage(flags.tab ? String(flags.tab) : undefined);
     if (flags.goto) { await page.goto(String(flags.goto)); return console.log(JSON.stringify({ ok: true, tab_id: page.tabId, url: flags.goto })); }
     if (flags.eval) return console.log(JSON.stringify({ ok: true, value: await page.evaluate(String(flags.eval)) }, null, 2));
+    if (flags.fetch) {
+      let headers;
+      if (flags.headers) { try { headers = JSON.parse(flags.headers); } catch { headers = undefined; } }
+      let body;
+      if (flags.body) { try { body = JSON.parse(flags.body); } catch { body = flags.body; } }
+      const res = await page.fetch(String(flags.fetch), { method: flags.method ? String(flags.method) : undefined, headers, body });
+      return console.log(JSON.stringify({ ok: true, ...res }, null, 2));
+    }
     if (flags.observe) {
       const max = flags["max-chars"] ? Number(flags["max-chars"]) : undefined;
       return console.log(JSON.stringify({ ok: true, ...await observe(page, { selector: flags.selector, maxChars: max }) }, null, 2));

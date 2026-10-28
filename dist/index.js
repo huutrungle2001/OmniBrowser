@@ -6,7 +6,7 @@ import {
   download,
   observe,
   screenshot
-} from "./chunk-ZR5WML4E.js";
+} from "./chunk-FN6CJW7Z.js";
 export {
   Browser,
   CdpConnection,

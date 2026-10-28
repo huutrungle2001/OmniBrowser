@@ -223,6 +223,26 @@ var Page = class {
     });
   }
   async act(action, opts) {
+    if (action.action === "click") {
+      const rect = await this.evaluate(`(() => {
+        const { ref, selector, snapshotId } = ${JSON.stringify({ ...action, snapshotId: opts?.snapshotId })};
+        const win = window;
+        if (snapshotId && win.__omni_snapshot_id && win.__omni_snapshot_id !== snapshotId) return { error: "STALE_REF" };
+        let el = null;
+        if (ref) el = win.__omni_refs ? win.__omni_refs[ref] : null;
+        else if (selector) el = document.querySelector(selector);
+        if (!el) return null;
+        try { el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" }); } catch {}
+        const r = el.getBoundingClientRect();
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), width: r.width, height: r.height };
+      })()`);
+      if (rect && !rect.error && rect.width > 0 && rect.height > 0) {
+        await this.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: rect.x, y: rect.y });
+        await this.send("Input.dispatchMouseEvent", { type: "mousePressed", x: rect.x, y: rect.y, button: "left", clickCount: 1 });
+        await this.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: rect.x, y: rect.y, button: "left", clickCount: 1 });
+        return { ok: true, action: "click", value: { x: rect.x, y: rect.y } };
+      }
+    }
     const code = `(${inBrowserAct.toString()})(${JSON.stringify({ ...action, snapshotId: opts?.snapshotId })})`;
     return this.evaluate(code);
   }
@@ -247,6 +267,42 @@ var Page = class {
       else if (sel) target = document.querySelector(sel) || window;
       target.scrollBy({ left: dx, top: dy, behavior: "instant" });
     })(${dx}, ${dy}, ${JSON.stringify(opts?.ref)}, ${JSON.stringify(opts?.selector)})`);
+  }
+  async fetch(urlOrPath, opts) {
+    const code = `(async () => {
+      try {
+        const url = ${JSON.stringify(urlOrPath)};
+        const rawOpts = ${JSON.stringify(opts || {})};
+        const reqOpts = {
+          method: (rawOpts.method || "GET").toUpperCase(),
+          headers: { ...(rawOpts.headers || {}) },
+          credentials: "include"
+        };
+        if (rawOpts.body !== undefined && rawOpts.body !== null) {
+          if (typeof rawOpts.body === "object") {
+            reqOpts.body = JSON.stringify(rawOpts.body);
+            const hasCT = Object.keys(reqOpts.headers).some(k => k.toLowerCase() === "content-type");
+            if (!hasCT) reqOpts.headers["Content-Type"] = "application/json";
+          } else {
+            reqOpts.body = String(rawOpts.body);
+          }
+        }
+        const res = await window.fetch(url, reqOpts);
+        const cType = res.headers.get("content-type") || "";
+        let data;
+        if (cType.includes("application/json")) {
+          try { data = await res.json(); } catch { data = await res.text(); }
+        } else {
+          data = await res.text();
+        }
+        const headers = {};
+        res.headers.forEach((v, k) => { headers[k] = v; });
+        return { ok: res.ok, status: res.status, statusText: res.statusText, headers, data };
+      } catch (err) {
+        return { ok: false, status: 0, statusText: "FetchError", headers: {}, data: String(err && err.message ? err.message : err) };
+      }
+    })()`;
+    return this.evaluate(code, { timeoutMs: opts?.timeoutMs ?? 15e3 });
   }
 };
 

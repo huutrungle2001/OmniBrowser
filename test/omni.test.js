@@ -148,6 +148,7 @@ test("OmniBrowser v3 Comprehensive Real-world Test Suite", async (t) => {
     const toolsRes = await rpc("tools/list");
     assert.ok(toolsRes.result?.tools?.some(t => t.name === "act_batch"), "act_batch in tools");
     assert.ok(toolsRes.result?.tools?.some(t => t.name === "evaluate"), "evaluate in tools");
+    assert.ok(toolsRes.result?.tools?.some(t => t.name === "fetch"), "fetch in tools");
 
     const callRes = await rpc("tools/call", { name: "list_tabs", arguments: {} });
     assert.ok(!callRes.result.isError, "list_tabs returned cleanly");

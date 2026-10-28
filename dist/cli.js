@@ -3,7 +3,7 @@ import {
   Browser,
   observe,
   screenshot
-} from "./chunk-ZR5WML4E.js";
+} from "./chunk-FN6CJW7Z.js";
 
 // src/cli.ts
 var args = process.argv.slice(2);
@@ -35,6 +35,26 @@ async function main() {
       return console.log(JSON.stringify({ ok: true, tab_id: page.tabId, url: flags.goto }));
     }
     if (flags.eval) return console.log(JSON.stringify({ ok: true, value: await page.evaluate(String(flags.eval)) }, null, 2));
+    if (flags.fetch) {
+      let headers;
+      if (flags.headers) {
+        try {
+          headers = JSON.parse(flags.headers);
+        } catch {
+          headers = void 0;
+        }
+      }
+      let body;
+      if (flags.body) {
+        try {
+          body = JSON.parse(flags.body);
+        } catch {
+          body = flags.body;
+        }
+      }
+      const res = await page.fetch(String(flags.fetch), { method: flags.method ? String(flags.method) : void 0, headers, body });
+      return console.log(JSON.stringify({ ok: true, ...res }, null, 2));
+    }
     if (flags.observe) {
       const max = flags["max-chars"] ? Number(flags["max-chars"]) : void 0;
       return console.log(JSON.stringify({ ok: true, ...await observe(page, { selector: flags.selector, maxChars: max }) }, null, 2));

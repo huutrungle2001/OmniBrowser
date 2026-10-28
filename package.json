@@ -4,6 +4,11 @@
   "description": "OmniBrowser v3: Ultra-lightweight Raw CDP browser automation",
   "type": "module",
   "main": "dist/cli.js",
+  "files": [
+    "dist",
+    "skills",
+    "README.md"
+  ],
   "bin": {
     "omni": "./dist/cli.js",
     "omni-mcp": "./dist/mcp.js"
